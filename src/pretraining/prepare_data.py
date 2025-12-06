@@ -2,7 +2,6 @@ import argparse
 import json
 import multiprocessing
 import os
-import pickle
 import random
 from multiprocessing import Pool, cpu_count
 
@@ -26,12 +25,16 @@ def set_seeds(seed):
     torch.cuda.manual_seed(seed)
 
 
-def create_transformers_from_conf_file(processing_conf):
-    classes = [BlockSwap, ConfusionRemover, DeadCodeInserter, ForWhileTransformer, OperandSwap, VarRenamer]
-    transformers = {
-        c: processing_conf[c.__name__] for c in classes
+def create_transformers_from_conf_file():
+    # Ignore weighting/config; use one instance per transform, exclude noising.
+    return {
+        BlockSwap: 1,
+        ConfusionRemover: 1,
+        DeadCodeInserter: 1,
+        ForWhileTransformer: 1,
+        OperandSwap: 1,
+        VarRenamer: 1
     }
-    return transformers
 
 
 class ExampleProcessor:
@@ -40,82 +43,54 @@ class ExampleProcessor:
             language,
             parser_path,
             transformation_config,
-            bidirection_transformation=False,
             max_function_length=400
     ):
         self.language = language
         self.parser_path = parser_path
         self.transformation_config = transformation_config
         self.max_function_length = max_function_length
-        self.bidirection_transformation = bidirection_transformation
 
     def initialize(self):
-        global example_tokenizer
         global example_transformer
-        transformers = create_transformers_from_conf_file(self.transformation_config)
-        if self.language == "nl":
-            example_tokenizer = nltk.word_tokenize
-        else:
-            example_tokenizer = NoTransformation(self.parser_path, self.language)
+        transformers = create_transformers_from_conf_file()
         example_transformer = SemanticPreservingTransformation(
             parser_path=self.parser_path, language=self.language, transform_functions=transformers
         )
 
-    def process_example(self, code):
-        global example_tokenizer
+    def process_example(self, record):
         global example_transformer
         try:
-            if self.language == "nl":
-                original_code = " ".join(example_tokenizer(code))
-            else:
-                original_code, _ = example_tokenizer.transform_code(code)
+            func_before = record.get('func_before', '')
+            func_after = record.get('func_after', '')
+            vul = int(record.get('vul', 0))
+            original_code = func_before if isinstance(func_before, str) else str(func_before)
             if len(original_code.split()) > self.max_function_length:
                 return -1
-            transformed_code, used_transformer = example_transformer.transform_code(code)
-            if used_transformer:
-                if used_transformer == "ConfusionRemover":  # Change the direction in case of the ConfusionRemover
-                    temp = original_code
-                    original_code = transformed_code
-                    transformed_code = temp
-                if isinstance(self.bidirection_transformation, str) and self.bidirection_transformation == 'adaptive':
-                    bidirection = (used_transformer in ["BlockSwap", "ForWhileTransformer", "OperandSwap"])
-                else:
-                    assert isinstance(self.bidirection_transformation, bool)
-                    bidirection = self.bidirection_transformation
-                if bidirection and np.random.uniform() < 0.5 \
-                        and used_transformer != "SyntacticNoisingTransformation":
-                    return {
-                        'source': original_code,
-                        'target': transformed_code,
-                        'transformer': used_transformer
-                    }
-                else:
-                    return {
-                        'source': transformed_code,
-                        'target': original_code,
-                        'transformer': used_transformer
-                    }
-            else:
+            variants = example_transformer.transform_code_multi(original_code, num_variants=10)
+            if len(variants) == 0:
                 return -1
+            return {
+                'func_before': original_code,
+                'func_after': func_after,
+                'vul': vul,
+                'transformed_code': variants
+            }
         except KeyboardInterrupt:
-            print("Stopping parsing for ", code)
+            print("Stopping parsing for ", record)
             return -1
         except:
             return -1
 
 
-def process_functions(
-        pool, example_processor, functions,
-        train_file_path=None, valid_file_path=None, valid_percentage=0.002
-):
+def process_split(pool, example_processor, records, output_path):
     used_transformers = {}
     success = 0
-    tf = open(train_file_path, "wt") if train_file_path is not None else None
-    vf = open(valid_file_path, "wt") if train_file_path is not None else None
-    with tqdm(total=len(functions)) as pbar:
+    total_variants = 0
+    out_f = open(output_path, "wt")
+    with tqdm(total=len(records)) as pbar:
         processed_example_iterator = pool.imap(
             func=example_processor.process_example,
-            iterable=functions,
+            iterable=records,
             chunksize=1000,
         )
         count = 0
@@ -123,35 +98,30 @@ def process_functions(
             pbar.update()
             count += 1
             try:
-                out = next(processed_example_iterator)
-                if isinstance(out, int) and out == -1:
+                rec = next(processed_example_iterator)
+                if isinstance(rec, int) and rec == -1:
                     continue
-                if out["transformer"] not in used_transformers.keys():
-                    used_transformers[out["transformer"]] = 0
-                used_transformers[out["transformer"]] += 1
-                if np.random.uniform() < valid_percentage:
-                    if vf is not None:
-                        vf.write(json.dumps(out) + "\n")
-                        vf.flush()
-                else:
-                    if tf is not None:
-                        tf.write(json.dumps(out) + "\n")
-                        tf.flush()
+                name = rec.get("transformer", "Mixed")
+                if name not in used_transformers.keys():
+                    used_transformers[name] = 0
+                used_transformers[name] += 1
+                if "transformed_code" in rec and isinstance(rec["transformed_code"], list):
+                    total_variants += len(rec["transformed_code"])
+                out_f.write(json.dumps(rec) + "\n")
+                out_f.flush()
                 success += 1
             except multiprocessing.TimeoutError:
                 print(f"{count} encountered timeout")
             except StopIteration:
                 print(f"{count} stop iteration")
                 break
-    if tf is not None:
-        tf.close()
-    if vf is not None:
-        vf.close()
+    out_f.close()
     print(
         f"""
-            Total   : {len(functions)}, 
+            Total   : {len(records)}, 
             Success : {success},
-            Failure : {len(functions) - success}
+            Failure : {len(records) - success}
+            Total Variants : {total_variants}
             Stats   : {json.dumps(used_transformers, indent=4)}
             """
     )
@@ -159,72 +129,51 @@ def process_functions(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument('--input_dir', required=True, help="Directory containing train.json/val.json/test.json")
     parser.add_argument(
-        '--langs', default=["java"], nargs='+',
-        help="Languages to be processed"
+        '--output_dir', required=True, help="Directory for saving processed code"
     )
     parser.add_argument(
-        '--input_dir', default="/home/saikatc/HDD_4TB/from_server/SemCode/pretraining/data/raw", help="Directory of the language pickle files"
+        '--parser_path', help="Tree-Sitter Parser Path", required=True
     )
-    parser.add_argument(
-        '--output_dir', default="/home/saikatc/HDD_4TB/from_server/SemCode/pretraining/data/processed", help="Directory for saving processed code"
-    )
-    parser.add_argument(
-        '--processing_config_file', default="configs/data_processing_config.json",
-        help="Configuration file for data processing."
-    )
-    parser.add_argument(
-        '--parser_path', help="Tree-Sitter Parser Path", default="/home/saikatc/HDD_4TB/from_server/SemCode/parser/languages.so"
-    )
-    parser.add_argument(
-        "--workers", help="Number of worker CPU", type=int, default=20
-    )
-    parser.add_argument(
-        "--timeout", type=int, help="Maximum number of seconds for a function to process.", default=10
-    )
-    parser.add_argument(
-        "--valid_percentage", type=float, help="Percentage of validation examples", default=0.001
-    )
+    parser.add_argument("--workers", help="Number of worker CPU", type=int, default=20)
+    parser.add_argument("--timeout", type=int, help="Maximum number of seconds for a function to process.", default=10)
     parser.add_argument("--seed", type=int, default=5000)
+    parser.add_argument("--max_function_length", type=int, default=400)
+    parser.add_argument("--num_variants", type=int, default=10)
     args = parser.parse_args()
     set_seeds(args.seed)
 
     out_dir = args.output_dir
     os.makedirs(out_dir, exist_ok=True)
-    configuration = json.load(open(args.processing_config_file))
-    print(configuration)
-    for lang in args.langs:
-        print(f"Now processing : {lang}")
-        pkl_file = os.path.join(args.input_dir, lang + ".pkl")
-        data = pickle.load(open(pkl_file, "rb"))
-        functions = [ex['function'] for ex in data]
-        # for f in functions[:5]:
-        #     print(f)
-        #     print("=" * 100)
-        if lang == "php":
-            functions = ["<?php\n" + f + "\n?>" for f in functions]
+    # Expect train.json, val.json, test.json in input_dir
+    split_files = {
+        "train": os.path.join(args.input_dir, "train.json"),
+        "val": os.path.join(args.input_dir, "val.json"),
+        "test": os.path.join(args.input_dir, "test.json"),
+    }
+    for split, path in split_files.items():
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Missing split file: {path}")
+
+    for split, path in split_files.items():
+        print(f"Now processing split: {split}")
+        data = json.load(open(path))
         example_processor = ExampleProcessor(
-            language=lang,
+            language="c",  # dataset assumed C/C++
             parser_path=args.parser_path,
-            transformation_config=configuration["transformers"],
-            max_function_length=(
-                configuration["max_function_length"] if "max_function_length" in configuration else 400
-            ),
-            bidirection_transformation=(
-                configuration["bidirection_transformation"] if "bidirection_transformation" in configuration else False
-            )
+            transformation_config={},
+            max_function_length=args.max_function_length
         )
         pool = Pool(
             processes=min(cpu_count(), args.workers),
             initializer=example_processor.initialize
         )
-        process_functions(
+        process_split(
             pool=pool,
             example_processor=example_processor,
-            functions=functions,
-            train_file_path=os.path.join(out_dir, f"{lang}_train.jsonl"),
-            valid_file_path=os.path.join(out_dir, f"{lang}_valid.jsonl"),
-            valid_percentage=args.valid_percentage
+            records=data,
+            output_path=os.path.join(out_dir, f"{split}.jsonl")
         )
         del pool
         del example_processor

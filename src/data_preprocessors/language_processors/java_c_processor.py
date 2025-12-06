@@ -908,53 +908,92 @@ class JavaAndCPPProcessor:
 
     @classmethod
     def block_swap_c(cls, code_str, parser):
-        code = code_str.encode()
-        root = parser.parse_code(code)
-        operator_list = ['<', '>', '<=', '>=', '==', '!=']
-        pair = cls.extract_if_else(root, code, operator_list)
+        """
+        Swap if/else blocks while negating the comparison operator to preserve semantics.
+        Simplified for current tree-sitter C/C++ AST (v0.20.x).
+        """
+        if isinstance(code_str, bytes):
+            code_bytes = code_str
+            code_str = code_str.decode()
+        else:
+            code_bytes = code_str.encode()
+
+        root = parser.parse_code(code_bytes)
+        operator_map = {
+            "<": ">=",
+            ">": "<=",
+            "<=": ">",
+            ">=": "<",
+            "==": "!=",
+            "!=": "==",
+        }
+
+        def find_if_with_else(node):
+            queue = [node]
+            while queue:
+                cur = queue.pop(0)
+                if cur.type == "if_statement":
+                    children = cur.children
+                    # expected order: 'if', condition, consequence, else_clause
+                    if len(children) >= 4 and children[3].type == "else_clause":
+                        return cur
+                queue.extend(cur.children)
+            return None
+
         success = False
-        lst = list(range(0, len(pair)))
-        try:
-            while not success and len(lst) > 0:
-                selected = np.random.choice(lst)
-                lst.remove(selected)
-                clause = pair[selected][0]
-                des = pair[selected][1]
-                st = [des]
-                nodes = []
-                while len(st) > 0:
-                    root1 = st.pop()
-                    if len(root1.children) == 0:
-                        nodes.append(root1)
-                        if (code[root1.start_byte:root1.end_byte].decode()) in operator_list:
-                            opt_node = root1
-                            break
-                    for child in root1.children:
-                        st.append(child)
-                nodes = clause.children
-                flag = 0
-                for current_node in nodes:
-                    if str(current_node.type) == 'compound_statement':
-                        if flag == 0:
-                            first_block = current_node
-                            flag = 1
-                        else:
-                            second_block = current_node
-                flagx = 0
-                flagy = 0
-                try:
-                    code_list = \
-                        cls.get_tokens_for_blockswap(code, root, first_block, opt_node, second_block, flagx, flagy)[0]
-                    code_string = ""
-                    for w in code_list:
-                        code_string = code_string + w + " "
-                    code_string = code_string.strip()
-                    success = True
-                except:
-                    success = False
-                    continue
-        except:
-            pass
-        if not success:
+        if_node = find_if_with_else(root)
+        if if_node:
+            try:
+                children = if_node.children
+                cond_node = children[1]
+                conseq_node = children[2]
+                else_clause = children[3]
+                # else_clause children: 'else', block
+                alt_block = else_clause.children[-1]
+
+                # Extract binary expression inside parentheses
+                cond_expr = cond_node
+                if cond_expr.type == "condition_clause":
+                    # condition_clause: '(', binary_expression, ')'
+                    if len(cond_expr.children) >= 2:
+                        cond_expr = cond_expr.children[1]
+                if cond_expr.type == "parenthesized_expression" and len(cond_expr.children) >= 2:
+                    cond_expr = cond_expr.children[1]
+                if cond_expr.type == "binary_expression" and len(cond_expr.children) >= 3:
+                    left, op_node, right = cond_expr.children[0], cond_expr.children[1], cond_expr.children[2]
+                    op_text = code_bytes[op_node.start_byte:op_node.end_byte].decode()
+                    if op_text in operator_map:
+                        neg_cond = (
+                            code_bytes[left.start_byte:left.end_byte]
+                            + b" " + operator_map[op_text].encode() + b" "
+                            + code_bytes[right.start_byte:right.end_byte]
+                        )
+                        new_condition = b"(" + neg_cond + b")"
+
+                        # Build swapped blocks
+                        then_block = code_bytes[conseq_node.start_byte:conseq_node.end_byte]
+                        else_block = code_bytes[alt_block.start_byte:alt_block.end_byte]
+
+                        # Assemble new if statement
+                        new_if = (
+                            code_bytes[if_node.start_byte:cond_node.start_byte]
+                            + new_condition
+                            + code_bytes[cond_node.end_byte:conseq_node.start_byte]
+                            + else_block
+                            + b" else "
+                            + then_block
+                        )
+                        code_bytes = (
+                            code_bytes[:if_node.start_byte]
+                            + new_if
+                            + code_bytes[if_node.end_byte:]
+                        )
+                        success = True
+            except Exception:
+                success = False
+
+        if success:
+            code_string = code_bytes.decode()
+        else:
             code_string = cls.beautify_java_code(get_tokens(code_str, root))
         return code_string, success

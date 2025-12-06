@@ -1,9 +1,12 @@
 import numpy as np
 from typing import Dict, Callable
 
-from src.data_preprocessors.transformations import (
-    BlockSwap, ConfusionRemover, DeadCodeInserter, ForWhileTransformer, OperandSwap, SyntacticNoisingTransformation
-)
+from src.data_preprocessors.transformations.block_swap_transformations import BlockSwap
+from src.data_preprocessors.transformations.confusion_remove import ConfusionRemover
+from src.data_preprocessors.transformations.dead_code_inserter import DeadCodeInserter
+from src.data_preprocessors.transformations.for_while_transformation import ForWhileTransformer
+from src.data_preprocessors.transformations.operand_swap_transformations import OperandSwap
+from src.data_preprocessors.transformations.var_renaming_transformation import VarRenamer
 
 
 class SemanticPreservingTransformation:
@@ -14,41 +17,56 @@ class SemanticPreservingTransformation:
             transform_functions: Dict[Callable, int] = None,
     ):
         self.language = language
-        if transform_functions is not None:
-            self.transform_functions = transform_functions
-        else:
+        # Ignore weighting; use one instance per transform (no SyntacticNoising).
+        if transform_functions is None:
             self.transform_functions = {
                 BlockSwap: 1,
                 ConfusionRemover: 1,
                 DeadCodeInserter: 1,
                 ForWhileTransformer: 1,
                 OperandSwap: 1,
-                SyntacticNoisingTransformation: 1
+                VarRenamer: 1
             }
-        self.transformations = []
-        if self.language == "nl":
-            self.transformations.append(SyntacticNoisingTransformation(parser_path=parser_path, language="nl"))
         else:
-            for t in self.transform_functions:
-                for _ in range(self.transform_functions[t]):
-                    self.transformations.append(t(parser_path=parser_path, language=language))
+            self.transform_functions = transform_functions
+        self.transformations = []
+        for t in self.transform_functions:
+            for _ in range(self.transform_functions[t]):
+                self.transformations.append(t(parser_path=parser_path, language=language))
 
     def transform_code(
             self,
             code: str
     ):
-        transformed_code, transformation_name = None, None
-        indices = list(range(len(self.transformations)))
-        np.random.shuffle(indices)
-        success = False
-        while not success and len(indices) > 0:
-            si = np.random.choice(indices)
-            indices.remove(si)
-            t = self.transformations[si]
-            transformed_code, metadata = t.transform_code(code)
-            success = metadata["success"]
-            if success:
-                transformation_name = type(t).__name__
-        if not success:
+        variants = self.transform_code_multi(code, num_variants=10)
+        if len(variants) == 0:
             return code, None
-        return transformed_code, transformation_name
+        # Return the last stacked variant for compatibility
+        transformed_code = variants[-1]
+        return transformed_code, None
+
+    def transform_code_multi(self, code: str, num_variants: int = 10):
+        variants = []
+
+        for _ in range(num_variants):
+            code_current = code
+            indices = list(range(len(self.transformations)))
+            np.random.shuffle(indices)
+            applied = False
+            for idx in indices:
+                if np.random.uniform() > 0.5:
+                    t = self.transformations[idx]
+                    out, meta = t.transform_code(code_current)
+                    if meta.get("success", False):
+                        code_current = out
+                        applied = True
+            if not applied:
+                # Fallback: try first in shuffled list
+                t = self.transformations[indices[0]]
+                out, meta = t.transform_code(code_current)
+                if meta.get("success", False):
+                    code_current = out
+                    applied = True
+            if applied:
+                variants.append(code_current)
+        return variants
