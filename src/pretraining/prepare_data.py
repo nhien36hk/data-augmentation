@@ -158,7 +158,8 @@ if __name__ == '__main__':
 
     for split, path in split_files.items():
         print(f"Now processing split: {split}")
-        data = json.load(open(path))
+        with open(path) as f:
+            data = [json.loads(line) for line in f if line.strip()]
         example_processor = ExampleProcessor(
             language="c",  # dataset assumed C/C++
             parser_path=args.parser_path,
@@ -173,7 +174,7 @@ if __name__ == '__main__':
             pool=pool,
             example_processor=example_processor,
             records=data,
-            output_path=os.path.join(out_dir, f"{split}.jsonl")
+            output_path=os.path.join(out_dir, f"{split}.json")
         )
         del pool
         del example_processor
