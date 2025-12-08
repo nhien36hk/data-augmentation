@@ -149,8 +149,8 @@ if __name__ == '__main__':
     # Expect train.json, val.json, test.json in input_dir
     split_files = {
         "train": os.path.join(args.input_dir, "train.json"),
-        # "val": os.path.join(args.input_dir, "val.json"),
-        # "test": os.path.join(args.input_dir, "test.json"),
+        "val": os.path.join(args.input_dir, "val.json"),
+        "test": os.path.join(args.input_dir, "test.json"),
     }
     for split, path in split_files.items():
         if not os.path.exists(path):

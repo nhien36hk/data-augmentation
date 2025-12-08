@@ -6,7 +6,6 @@ nohup env PYTHONPATH=/datastore/inseclab/HuuNhien/data-augmentation \
   --parser_path parser/languages.so \
   --workers 20 \
   --max_function_length 2000 \
-  --num_variants 5 \
   > augmentation.log 2>&1 &
 
 # Collect a small sample of functions whose original code fails tree-sitter parsing (for analysis)
