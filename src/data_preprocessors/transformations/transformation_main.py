@@ -34,6 +34,25 @@ class SemanticPreservingTransformation:
             for _ in range(self.transform_functions[t]):
                 self.transformations.append(t(parser_path=parser_path, language=language))
 
+    def _is_valid_code(self, code: str) -> bool:
+        """
+        Parse code with tree-sitter and reject if parser reports errors.
+        Reuses the parser of the first transformation (all share same language/parser).
+        """
+        if not self.transformations:
+            return False
+        try:
+            root = self.transformations[0].parse_code(code)
+        except Exception:
+            return False
+        if getattr(root, "has_error", False):
+            return False
+        # Ensure parser consumed the full buffer.
+        if hasattr(root, "start_byte") and hasattr(root, "end_byte"):
+            if root.start_byte != 0 or root.end_byte != len(code.encode()):
+                return False
+        return True
+
     def transform_code(
             self,
             code: str
@@ -68,5 +87,7 @@ class SemanticPreservingTransformation:
                     code_current = out
                     applied = True
             if applied:
-                variants.append(code_current)
+                # Keep only syntactically valid variants
+                if self._is_valid_code(code_current):
+                    variants.append(code_current)
         return variants
