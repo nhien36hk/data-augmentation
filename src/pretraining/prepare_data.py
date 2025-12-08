@@ -82,11 +82,11 @@ class ExampleProcessor:
             return -1
 
 
-def process_split(pool, example_processor, records, output_path):
+def process_split(pool, example_processor, records, output_path, append=False):
     used_transformers = {}
     success = 0
     total_variants = 0
-    out_f = open(output_path, "wt")
+    out_f = open(output_path, "at" if append else "wt")
     with tqdm(total=len(records)) as pbar:
         processed_example_iterator = pool.imap(
             func=example_processor.process_example,
@@ -160,21 +160,39 @@ if __name__ == '__main__':
         print(f"Now processing split: {split}")
         with open(path) as f:
             data = [json.loads(line) for line in f if line.strip()]
-        example_processor = ExampleProcessor(
-            language="c",  # dataset assumed C/C++
-            parser_path=args.parser_path,
-            transformation_config={},
-            max_function_length=args.max_function_length
-        )
-        pool = Pool(
-            processes=min(cpu_count(), args.workers),
-            initializer=example_processor.initialize
-        )
-        process_split(
-            pool=pool,
-            example_processor=example_processor,
-            records=data,
-            output_path=os.path.join(out_dir, f"{split}.json")
-        )
-        del pool
-        del example_processor
+
+        # Partition raw records by language tag (expected values: C, CPP)
+        c_records = [r for r in data if str(r.get("lang", "")).upper() == "C"]
+        cpp_records = [r for r in data if str(r.get("lang", "")).upper() == "CPP"]
+
+        print("Total Func Lang C: ", len(c_records))
+        print("Total Func Lang CPP: ", len(cpp_records))
+
+        output_path = os.path.join(out_dir, f"{split}.json")
+        wrote_any = False
+
+        for lang_key, records in [("c", c_records), ("cpp", cpp_records)]:
+            if not records:
+                continue
+            example_processor = ExampleProcessor(
+                language=lang_key,
+                parser_path=args.parser_path,
+                transformation_config={},
+                max_function_length=args.max_function_length
+            )
+            pool = Pool(
+                processes=min(cpu_count(), args.workers),
+                initializer=example_processor.initialize
+            )
+            process_split(
+                pool=pool,
+                example_processor=example_processor,
+                records=records,
+                output_path=output_path,
+                append=wrote_any
+            )
+            pool.close()
+            pool.join()
+            del pool
+            del example_processor
+            wrote_any = True
