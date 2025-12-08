@@ -3,6 +3,7 @@ import json
 import multiprocessing
 import os
 import random
+import re
 from multiprocessing import Pool, cpu_count
 
 import nltk
@@ -36,6 +37,51 @@ def create_transformers_from_conf_file():
         VarRenamer: 1
     }
 
+# --------------------------------------------------------------------------- #
+# Language detection (C vs C++) using compiled regex patterns
+# --------------------------------------------------------------------------- #
+_CPP_PATTERNS = [
+    re.compile(r'\w+\s*::\s*\w+'),
+    re.compile(r'\bclass\s+\w+'),
+    re.compile(r'\bnamespace\s+\w+'),
+    re.compile(r'\btemplate\s*<'),
+    re.compile(r'\bvirtual\s+'),
+    re.compile(r'\boverride\b'),
+    re.compile(r'\bnullptr\b'),
+    re.compile(r'\bpublic\s*:'),
+    re.compile(r'\bprivate\s*:'),
+    re.compile(r'\bprotected\s*:'),
+    re.compile(r'\bnew\s+\w+'),
+    re.compile(r'\bdelete\s+'),
+    re.compile(r'\bdelete\s*\['),
+    re.compile(r'\bstd::'),
+    re.compile(r'\bconstexpr\b'),
+    re.compile(r'\bauto\s+\w+\s*='),
+    re.compile(r'\btry\s*\{'),
+    re.compile(r'\bcatch\s*\('),
+    re.compile(r'\bthrow\s+'),
+    re.compile(r'\busing\s+namespace\b'),
+    re.compile(r'\bfriend\s+'),
+    re.compile(r'\bexplicit\s+'),
+    re.compile(r'\binline\s+'),
+    re.compile(r'\bconst_cast\s*<'),
+    re.compile(r'\bstatic_cast\s*<'),
+    re.compile(r'\bdynamic_cast\s*<'),
+    re.compile(r'\breinterpret_cast\s*<'),
+    re.compile(r'\btypename\s+'),
+    re.compile(r'\boperator\s*[+\-*/%=<>!&|^~\[\]()]+'),
+    re.compile(r'::\s*~\w+'),
+    re.compile(r'\w+\s*<[^>]+>\s*\w+'),
+]
+
+
+def detect_language(code: str) -> str:
+    """Return 'cpp' if any C++-specific pattern matches; otherwise 'c'."""
+    for p in _CPP_PATTERNS:
+        if p.search(code):
+            return "cpp"
+    return "c"
+
 
 class ExampleProcessor:
     def __init__(
@@ -66,14 +112,15 @@ class ExampleProcessor:
             original_code = func_before if isinstance(func_before, str) else str(func_before)
             if len(original_code.split()) > self.max_function_length:
                 return -1
-            variants = example_transformer.transform_code_multi(original_code, num_variants=10)
+            variants, stats = example_transformer.transform_code_multi(original_code, num_variants=10)
             if len(variants) == 0:
                 return -1
             return {
                 'func_before': original_code,
                 'func_after': func_after,
                 'vul': vul,
-                'transformed_code': variants
+                'transformed_code': variants,
+                'transform_stats': stats
             }
         except KeyboardInterrupt:
             print("Stopping parsing for ", record)
@@ -86,6 +133,8 @@ def process_split(pool, example_processor, records, output_path, append=False):
     used_transformers = {}
     success = 0
     total_variants = 0
+    total_valid_variants = 0
+    total_invalid_variants = 0
     out_f = open(output_path, "at" if append else "wt")
     with tqdm(total=len(records)) as pbar:
         processed_example_iterator = pool.imap(
@@ -107,6 +156,10 @@ def process_split(pool, example_processor, records, output_path, append=False):
                 used_transformers[name] += 1
                 if "transformed_code" in rec and isinstance(rec["transformed_code"], list):
                     total_variants += len(rec["transformed_code"])
+                stats = rec.get("transform_stats", {})
+                if isinstance(stats, dict):
+                    total_valid_variants += int(stats.get("valid_variants", 0))
+                    total_invalid_variants += int(stats.get("invalid_variants", 0))
                 out_f.write(json.dumps(rec) + "\n")
                 out_f.flush()
                 success += 1
@@ -122,6 +175,8 @@ def process_split(pool, example_processor, records, output_path, append=False):
             Success : {success},
             Failure : {len(records) - success}
             Total Variants : {total_variants}
+            Valid Variants : {total_valid_variants}
+            Invalid Variants : {total_invalid_variants}
             Stats   : {json.dumps(used_transformers, indent=4)}
             """
     )
@@ -161,9 +216,15 @@ if __name__ == '__main__':
         with open(path) as f:
             data = [json.loads(line) for line in f if line.strip()]
 
-        # Partition raw records by language tag (expected values: C, CPP)
-        c_records = [r for r in data if str(r.get("lang", "")).upper() == "C"]
-        cpp_records = [r for r in data if str(r.get("lang", "")).upper() == "CPP"]
+        # Auto-detect language (C/C++) from code content instead of relying on 'lang' column
+        c_records, cpp_records = [], []
+        for r in tqdm(data, desc="Detect lang", leave=False):
+            func_before = r.get("func_before", "")
+            lang_detected = detect_language(func_before if isinstance(func_before, str) else str(func_before))
+            if lang_detected == "cpp":
+                cpp_records.append(r)
+            else:
+                c_records.append(r)
 
         print("Total Func Lang C: ", len(c_records))
         print("Total Func Lang CPP: ", len(cpp_records))

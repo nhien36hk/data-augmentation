@@ -57,15 +57,17 @@ class SemanticPreservingTransformation:
             self,
             code: str
     ):
-        variants = self.transform_code_multi(code, num_variants=10)
+        variants, stats = self.transform_code_multi(code, num_variants=10)
         if len(variants) == 0:
-            return code, None
+            return code, stats
         # Return the last stacked variant for compatibility
         transformed_code = variants[-1]
-        return transformed_code, None
+        return transformed_code, stats
 
     def transform_code_multi(self, code: str, num_variants: int = 10):
         variants = []
+        valid_count = 0
+        invalid_count = 0
 
         for _ in range(num_variants):
             code_current = code
@@ -87,7 +89,15 @@ class SemanticPreservingTransformation:
                     code_current = out
                     applied = True
             if applied:
-                # Keep only syntactically valid variants
+                # Always keep applied variants; track validity for stats
                 if self._is_valid_code(code_current):
-                    variants.append(code_current)
-        return variants
+                    valid_count += 1
+                else:
+                    invalid_count += 1
+                variants.append(code_current)
+
+        stats = {
+            "valid_variants": valid_count,
+            "invalid_variants": invalid_count,
+        }
+        return variants, stats
