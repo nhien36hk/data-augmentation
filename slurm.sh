@@ -2,11 +2,11 @@ nohup env PYTHONPATH=/datastore/inseclab/HuuNhien/data-augmentation \
   /datastore/inseclab/HuuNhien/shared_env/bin/python \
   /datastore/inseclab/HuuNhien/data-augmentation/src/pretraining/prepare_data.py \
   --input_dir data/augmentation \
-  --output_dir data/augmentation/output \
+  --output_dir data/augmentation/output-clean \
   --parser_path parser/languages.so \
   --workers 20 \
-  --max_function_length 2000 \
-  > augmentation.log 2>&1 &
+  --max_function_length 4000 \
+  > augmentation-clean.log 2>&1 &
 
 # Collect a small sample of functions whose original code fails tree-sitter parsing (for analysis)
 # Adjust --limit and --input if needed.
@@ -18,3 +18,5 @@ nohup env PYTHONPATH=/datastore/inseclab/HuuNhien/data-augmentation \
   --output data/augmentation/output/parse_error_samples.jsonl \
   --limit 30 \
   > parse_errors.log 2>&1 &
+
+ps -ef | grep prepare_data.py
