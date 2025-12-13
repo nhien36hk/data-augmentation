@@ -31,7 +31,7 @@ def get_split_df(dataset, idxs):
 
 def load_split_datasets(path, dataset):
     print(f"Loading split datasets from {path}")
-    indices = load_split_indices(path, 'split_idx.pkl')
+    indices = load_split_indices(path+"/split", 'split_idx.pkl')
 
     train_df = get_split_df(dataset, indices['train'])
     val_df = get_split_df(dataset, indices['val'])
