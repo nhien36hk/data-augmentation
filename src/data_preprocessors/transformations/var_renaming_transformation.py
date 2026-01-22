@@ -70,11 +70,67 @@ class VarRenamer(TransformationBase):
         # Simple whitelist for system/library functions to avoid renaming
         # This prevents 'printf', 'print', 'main' from becoming VAR_X
         # while still allowing 'badSink', 'goodG2B' to be renamed.
+        # Comprehensive whitelist for system/library functions to avoid renaming.
+        # Keeping these names is crucial for ML models to learn vulnerability patterns 
+        # (e.g., 'gets' and 'strcpy' are strong indicators of Buffer Overflow).
         BLACKLIST_NAMES = {
-            "main", "printf", "print", "println", "System.out.println", 
-            "fprintf", "sprintf", "cout", "cin", "std::cout", "std::cin",
-            "memcpy", "memset", "strcpy", "strncpy", "malloc", "free",
-            "strlen", "strcmp", "fopen", "fclose"
+            # --- C/C++ Input/Output ---
+            "main", "printf", "print", "println", "System.out.println",
+            "fprintf", "sprintf", "snprintf", "wsprintf",
+            "scanf", "fscanf", "sscanf", "swscanf",
+            "gets", "fgets", "getchar", "getc",
+            "puts", "fputs", "putchar", "putc",
+            "cout", "cin", "cerr", "std::cout", "std::cin", "std::cerr",
+            
+            # --- String Manipulation (Common Sinks) ---
+            "strcpy", "strncpy", "strcat", "strncat", 
+            "memcpy", "memmove", "memset", "memcmp",
+            "strlen", "wcslen",
+            "strcmp", "strncmp", "strcasecmp",
+            "strchr", "strrchr", "strstr",
+            "strdup", "strtok",
+            
+            # --- Memory Management ---
+            "malloc", "calloc", "realloc", "free", "alloca", "new", "delete",
+            
+            # --- File Operations ---
+            "fopen", "fclose", "fread", "fwrite", "open", "read", "write", "close",
+            "fseek", "ftell", "rewind", "fflush",
+            "access", "stat", "chmod", "chown",
+            
+            # --- Process & Execution (Command Injection Sinks) ---
+            "system", "popen", "pclose", 
+            "execl", "execlp", "execle", "execv", "execvp", "execvpe",
+            "fork", "wait", "exit", "abort",
+            "dlopen", "dlsym",
+            
+            # --- Conversions & Utilities ---
+            "atoi", "atof", "atol", "atoll", "strtol", "strtoul", "strtod",
+            "abs", "rand", "srand", "time",
+            "getenv", "putenv", "setenv", "unsetenv",
+            
+            # --- Java Common Methods & Security Sinks ---
+            "equals", "length", "size", "toString", "hashCode", "clone",
+            "substring", "trim", "charAt", "append",
+            "parseInt", "parseFloat", "valueOf", "readLine",
+            
+            # --- Java SQL (Injection Sinks) ---
+            "executeQuery", "executeUpdate", "execute", "addBatch",
+            "Connection", "Statement", "PreparedStatement", "ResultSet",
+            "prepareCall", "createStatement", "prepareStatement",
+            
+            # --- Java IO & Serialization ---
+            "readObject", "writeObject", "Serializable",
+            "FileInputStream", "FileOutputStream", "ObjectInputStream", "ObjectOutputStream",
+            "File", "FileReader", "FileWriter", "BufferedReader", "PrintWriter",
+            
+            # --- Java Command Injection ---
+            "Runtime", "exec", "ProcessBuilder", "start",
+            
+            # --- Java XML/Web (XXE, XSS) ---
+            "DocumentBuilder", "DocumentBuilderFactory", "SAXParser", "SAXParserFactory",
+            "HttpServletRequest", "HttpServletResponse", "getParameter", "getAttribute",
+            "sendRedirect", "getWriter", "cookies", "getSession"
         }
 
         while len(queue) > 0:
@@ -241,7 +297,8 @@ if __name__ == '__main__':
     }
     code_directory = os.path.realpath(os.path.join(os.path.realpath(__file__), '../../../..'))
     parser_path = os.path.join(code_directory, "parser/languages.so")
-    for lang in ["c", "cpp", "java", "python", "php", "ruby", "js", "go", "cs"]:
+    # Only run for C, CPP, and Java as requested
+    for lang in ["c", "cpp", "java"]:
         lang, code = input_map[lang]
         var_renamer = VarRenamer(
             parser_path, lang
