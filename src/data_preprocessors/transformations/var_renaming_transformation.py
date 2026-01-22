@@ -59,19 +59,35 @@ class VarRenamer(TransformationBase):
         # Java: class_declaration, method_declaration
         # python: function_definition, call
         # js: function_declaration
-        self.not_var_ptype = ["function_declarator", "class_declaration", "method_declaration", "function_definition",
-                              "function_declaration", "call", "local_function_statement"]
+        # Remove function definitions from blacklist to allow renaming them
+        # Kept: "class_declaration", "call" (to avoid renaming external library calls like printf)
+        self.not_var_ptype = ["class_declaration", "call"]
 
     def extract_var_names(self, root, code_string):
         var_names = []
         queue = [root]
+        
+        # Simple whitelist for system/library functions to avoid renaming
+        # This prevents 'printf', 'print', 'main' from becoming VAR_X
+        # while still allowing 'badSink', 'goodG2B' to be renamed.
+        BLACKLIST_NAMES = {
+            "main", "printf", "print", "println", "System.out.println", 
+            "fprintf", "sprintf", "cout", "cin", "std::cout", "std::cin",
+            "memcpy", "memset", "strcpy", "strncpy", "malloc", "free",
+            "strlen", "strcmp", "fopen", "fclose"
+        }
 
         while len(queue) > 0:
             current_node = queue[0]
             queue = queue[1:]
-            if (current_node.type == "identifier" or current_node.type == "variable_name") and str(
-                    current_node.parent.type) not in self.not_var_ptype:
-                var_names.append(self.tokenizer_function(code_string, current_node)[0])
+            
+            is_identifier = (current_node.type == "identifier" or current_node.type == "variable_name")
+            if is_identifier and str(current_node.parent.type) not in self.not_var_ptype:
+                name = self.tokenizer_function(code_string, current_node)[0]
+                # Filter out system functions
+                if name not in BLACKLIST_NAMES:
+                    var_names.append(name)
+                    
             for child in current_node.children:
                 queue.append(child)
         return var_names
@@ -82,7 +98,9 @@ class VarRenamer(TransformationBase):
         # print(" ".join(original_code))
         var_names = self.extract_var_names(root, code_string)
         var_names = list(set(var_names))
-        num_to_rename = math.ceil(0.2 * len(var_names))
+        # TODO: change to 20%
+        # num_to_rename = math.ceil(0.2 * len(var_names))
+        num_to_rename = len(var_names)
         random.shuffle(var_names)
         var_names = var_names[:num_to_rename]
         var_map = {}
@@ -120,6 +138,7 @@ if __name__ == '__main__':
             int res = 0;
             for(int i = 0; i < n; i++) {
                 int j = 0;
+                print("hello");
                 while (j < i){
                     res += j; 
                 }
