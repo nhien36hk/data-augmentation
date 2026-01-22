@@ -127,10 +127,42 @@ class VarRenamer(TransformationBase):
             # --- Java Command Injection ---
             "Runtime", "exec", "ProcessBuilder", "start",
             
-            # --- Java XML/Web (XXE, XSS) ---
-            "DocumentBuilder", "DocumentBuilderFactory", "SAXParser", "SAXParserFactory",
-            "HttpServletRequest", "HttpServletResponse", "getParameter", "getAttribute",
-            "sendRedirect", "getWriter", "cookies", "getSession"
+            # --- Juliet Test Suite Utilities ---
+            "printLine", "printIntLine", "printHexCharLine", "printLongLine", 
+            "printUnsignedLine", "printDoubleLine", "printStructLine", "printBytesLine",
+            "writeLine", "IO.writeLine", "IO.logger.log",
+            
+            # --- C/C++ Windows API & Dynamic Loading ---
+            "LoadLibrary", "LoadLibraryA", "LoadLibraryW", "FreeLibrary",
+            "GetProcAddress", "GetModuleHandle",
+            "sizeof", "ALLOCA",
+            
+            # --- C/C++ Network (Winsock/BSD) ---
+            "socket", "connect", "bind", "listen", "accept", "recv", "send",
+            "WSAStartup", "WSACleanup", "htons", "htonl", "ntohs", "ntohl",
+            "inet_addr", "inet_ntoa", "gethostbyname", "closesocket", "CLOSE_SOCKET",
+            
+            # --- C/C++ Wide Character Strings ---
+            "wcscpy", "wcslen", "wcschr", "wcsrchr", "wcscat", "wcsncat", "wcsncpy",
+            "fgetws", "wprintf", "fwprintf", "swprintf", "vswprintf",
+            
+            # --- Java Logging & IO ---
+            "log", "logger", "InputStreamReader", "OutputStreamWriter",
+            "ByteArrayInputStream", "ByteArrayOutputStream",
+            "Socket", "ServerSocket", "getInputStream", "getOutputStream",
+            
+            # --- Java Web/Cookie (Session & XSS related) ---
+            "Cookie", "addCookie", "getCookies", "getName", "getValue", "setValue",
+            "addHeader", "setHeader", "getHeader", 
+            "URLEncoder", "URLDecoder", "encode", "decode",
+            
+            # --- Java Database ---
+            "getDBConnection", "closeConnection",
+            
+            # --- Java Collections & Properties ---
+            "add", "put", "get", "remove", "clear", "containsKey", "containsValue",
+            "keySet", "entrySet", "iterator", "hasNext", "next",
+            "Properties", "getProperty", "setProperty", "load", "store"
         }
 
         while len(queue) > 0:
