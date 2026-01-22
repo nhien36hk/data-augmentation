@@ -194,7 +194,9 @@ if __name__ == '__main__':
             int res = 0;
             for(int i = 0; i < n; i++) {
                 int j = 0;
+                executeQuery("hello");
                 print("hello");
+                System.out.println("hello");
                 while (j < i){
                     res += j; 
                 }
