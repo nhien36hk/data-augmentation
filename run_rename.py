@@ -196,7 +196,18 @@ def main():
         return
 
     for file_path in jsonl_files:
-        output_file = out_path / file_path.name
+        filename = file_path.name.lower()
+        
+        # Simple filename filtering based on mode
+        if args.mode == 'java' and 'java' not in filename:
+            logger.info(f"Skipping {file_path.name} (Not a Java dataset)")
+            continue
+            
+        if args.mode == 'c' and 'java' in filename:
+            logger.info(f"Skipping {file_path.name} (Found 'java' in name, but mode is 'c')")
+            continue
+
+        output_file = out_path / file_path.name 
         process_file(file_path, output_file, args.mode, args.workers)
 
 if __name__ == "__main__":
