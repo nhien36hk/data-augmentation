@@ -207,7 +207,8 @@ def main():
             logger.info(f"Skipping {file_path.name} (Found 'java' in name, but mode is 'c')")
             continue
 
-        output_file = out_path / file_path.name 
+        output_file = out_path / f"{file_path.stem}_normalize{file_path.suffix}"
+        logger.info(f"Processing {file_path.name} -> {output_file.name}")
         process_file(file_path, output_file, args.mode, args.workers)
 
 if __name__ == "__main__":
