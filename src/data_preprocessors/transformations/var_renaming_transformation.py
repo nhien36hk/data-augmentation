@@ -182,27 +182,69 @@ class VarRenamer(TransformationBase):
 
     def var_renaming(self, code_string):
         root = self.parse_code(code_string)
-        original_code = self.tokenizer_function(code_string, root)
-        # print(" ".join(original_code))
-        var_names = self.extract_var_names(root, code_string)
-        var_names = list(set(var_names))
-        # TODO: change to 20%
-        # num_to_rename = math.ceil(0.2 * len(var_names))
-        num_to_rename = len(var_names)
-        random.shuffle(var_names)
-        var_names = var_names[:num_to_rename]
+        
+        # 1. Identify WHICH variables to rename
+        var_names_all = self.extract_var_names(root, code_string)
+        var_names_unique = list(set(var_names_all))
+        
+        # Rename logic (currently 100%)
+        num_to_rename = len(var_names_unique)
+        # random.shuffle(var_names_unique) # Optional: shuffle if we weren't renaming all
+        target_vars = var_names_unique[:num_to_rename]
+        
         var_map = {}
-        for idx, v in enumerate(var_names):
+        for idx, v in enumerate(target_vars):
             var_map[v] = f"VAR_{idx}"
-        modified_code = []
-        for t in original_code:
-            if t in var_names:
-                modified_code.append(var_map[t])
-            else:
-                modified_code.append(t)
+            
+        if not var_map:
+            return root, code_string, False
 
-        modified_code_string = " ".join(modified_code)
-        if modified_code != original_code:
+        # 2. Find ALL occurrences (Nodes) of these variables in the tree
+        # We traverse again to get exact byte ranges.
+        # Note: We re-use logic from extract_var_names but keep Node info.
+        
+        replacements = [] # List of (start_byte, end_byte, new_text)
+        queue = [root]
+        
+        while len(queue) > 0:
+            current_node = queue[0]
+            queue = queue[1:]
+            
+            is_identifier = (current_node.type == "identifier" or current_node.type == "variable_name")
+            
+            # Check if this node is a candidate for renaming
+            if is_identifier and str(current_node.parent.type) not in self.not_var_ptype:
+                # Get the actual text of this node
+                # Note: self.tokenizer_function returns a list of tokens, we take [0]
+                # But cleaner is to slice the code_string directly if possible, or trust tokenizer.
+                # using tokenizer matches extract_var_names logic.
+                name_tokens = self.tokenizer_function(code_string, current_node)
+                if name_tokens:
+                    name = name_tokens[0]
+                    # If this name is in our target renaming map, record it
+                    if name in var_map:
+                        replacements.append((current_node.start_byte, current_node.end_byte, var_map[name]))
+            
+            for child in current_node.children:
+                queue.append(child)
+                
+        # 3. Apply replacements in REVERSE order (so offsets don't shift)
+        replacements.sort(key=lambda x: x[0], reverse=True)
+        
+        # Use bytearray for efficient mutable editing
+        if isinstance(code_string, str):
+            code_bytes = bytearray(code_string, 'utf-8')
+        else:
+            code_bytes = bytearray(code_string)
+            
+        for start, end, new_text in replacements:
+            # Replace slice
+            new_text_bytes = new_text.encode('utf-8')
+            code_bytes[start:end] = new_text_bytes
+            
+        modified_code_string = code_bytes.decode('utf-8')
+        
+        if modified_code_string != code_string:
             modified_root = self.parse_code(modified_code_string)
             return modified_root, modified_code_string, True
         else:
@@ -213,132 +255,107 @@ class VarRenamer(TransformationBase):
             code: Union[str, bytes]
     ) -> Tuple[str, object]:
         root, code, success = self.var_renaming(code)
-        code = re.sub("[ \n\t]+", " ", code)
+        # Removed aggressive whitespace flattening to preserve newlines
+        # code = re.sub("[ \n\t]+", " ", code)
         return code, {
             "success": success
         }
 
 
 if __name__ == '__main__':
+    # Complex Java Example: Generics, Try-Catch, Annotations, Inner Class
     java_code = """
-    class A{
-        int foo(int n){
-            int res = 0;
-            for(int i = 0; i < n; i++) {
-                int j = 0;
-                executeQuery("hello");
-                print("hello");
-                System.out.println("hello");
-                while (j < i){
-                    res += j; 
+    @Override
+    public class ComplexProcessor<T> {
+        private static final int MAX_RETRIES = 3;
+        
+        public void process(List<String> items, Map<String, Object> config) {
+            int attempts = 0;
+            // Try-catch block with resources
+            try (BufferedReader reader = new BufferedReader(new FileReader("config.txt"))) {
+                String line = reader.readLine();
+                if (line != null) {
+                    System.out.println("Processing: " + line); // Whitelisted system call
                 }
+                
+                for (String item : items) {
+                    int len = item.length(); // Whitelisted method
+                    if (len > 10) {
+                        log("Item too long"); // Whitelisted log
+                    }
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            } finally {
+                cleanUp();
             }
-            return res;
+        }
+        
+        private void cleanUp() {
+            printLine("Cleanup done"); // Whitelisted Juliet utility
         }
     }
     """
-    python_code = """def foo(n):
-    res = 0
-    for i in range(0, 19, 2):
-        res += i
-    i = 0
-    while i in range(n):
-        res += i
-        i += 1
-    return res
-    """
+
+    # Complex C Example: Structs, Pointers, Macros, Comments, Buffer Ops
     c_code = """
-        int foo(int n){
-            int res = 0;
-            for(int i = 0; i < n; i++) {
-                int j = 0;
-                while (j < i){
-                    res += j; 
-                }
+    #define BUFFER_SIZE 256
+    
+    typedef struct {
+        int id;
+        char name[50];
+        double value;
+    } Item;
+
+    void process_data(Item *items, int count) {
+        char *buffer = (char *)malloc(BUFFER_SIZE * sizeof(char)); // Whitelisted malloc, sizeof
+        
+        /* Multi-line comment 
+           Check for null pointer */
+        if (buffer == NULL) {
+            printf("Memory error\\n"); // Whitelisted printf
+            return;
+        }
+
+        memset(buffer, 0, BUFFER_SIZE); // Whitelisted memset
+        
+        for (int i = 0; i < count; i++) {
+            Item *current = &items[i]; // Pointer arithmetic
+            
+            // Complex expression
+            if (current->id > 100 && current->value < 0.5) {
+                snprintf(buffer, BUFFER_SIZE, "Item %s", current->name); // Whitelisted snprintf
+                printLine(buffer); // Whitelisted Juliet utility
             }
-            return res;
         }
-    """
-    cs_code = """
-    int foo(int n){
-            int res = 0, i = 0;
-            while(i < n) {
-                int j = 0;
-                while (j < i){
-                    res += j; 
-                }
-            }
-            return res;
-        }
-    """
-    js_code = """function foo(n) {
-        let res = '';
-        for(let i = 0; i < 10; i++){
-            res += i.toString();
-            res += '<br>';
-        } 
-        while ( i < 10 ; ) { 
-            res += 'bk'; 
-        }
-        return res;
+        
+        free(buffer); // Whitelisted free
     }
-    """
-    ruby_code = """
-        for i in 0..5 do
-           puts "Value of local variable is #{i}"
-           if false then
-                puts "False printed"
-                while i == 10 do
-                    print i;
-                end
-                i = u + 8
-            end
-        end
-        """
-    go_code = """
-        func main() {
-            sum := 0;
-            i := 0;
-            for ; i < 10;  {
-                sum += i;
-            }
-            i++;
-            fmt.Println(sum);
-        }
-        """
-    php_code = """
-    <?php 
-    for ($x = 0; $x <= 10; $x++) {
-        echo "The number is: $x <br>";
-    }
-    $x = 0 ; 
-    while ( $x <= 10 ) { 
-        echo "The number is:  $x  <br> "; 
-        $x++; 
-    } 
-    ?> 
     """
     input_map = {
         "java": ("java", java_code),
         "c": ("c", c_code),
-        "cpp": ("cpp", c_code),
-        "cs": ("c_sharp", cs_code),
-        "js": ("javascript", js_code),
-        "python": ("python", python_code),
-        "php": ("php", php_code),
-        "ruby": ("ruby", ruby_code),
-        "go": ("go", go_code),
     }
+    
     code_directory = os.path.realpath(os.path.join(os.path.realpath(__file__), '../../../..'))
     parser_path = os.path.join(code_directory, "parser/languages.so")
-    # Only run for C, CPP, and Java as requested
-    for lang in ["c", "cpp", "java"]:
-        lang, code = input_map[lang]
-        var_renamer = VarRenamer(
-            parser_path, lang
-        )
-        print(lang)
-        code, meta = var_renamer.transform_code(code)
-        print(re.sub("[ \t\n]+", " ", code))
-        print(meta)
-        print("=" * 150)
+    
+    # Only run for C and Java as requested
+    for lang_key in ["c", "java"]:
+        if lang_key not in input_map: continue
+            
+        lang, code = input_map[lang_key]
+        print(f"\n{'='*20} TESTING {lang.upper()} {'='*20}")
+        
+        var_renamer = VarRenamer(parser_path, lang)
+        
+        print("--- ORIGINAL ---")
+        print(code)
+        
+        # Transform
+        new_code, meta = var_renamer.transform_code(code)
+        
+        print("\n--- TRANSFORMED (Check whitespace preservation) ---")
+        print(new_code)
+        print("-" * 50)
+
