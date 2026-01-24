@@ -1,3 +1,13 @@
+import sys
+import os
+
+# Enable direct execution by adding project root to sys.path
+if __name__ == "__main__" and __package__ is None:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(current_dir, "../../.."))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
 import math
 import random
 import re
@@ -129,6 +139,7 @@ class VarRenamer(TransformationBase):
             "printLine", "printIntLine", "printHexCharLine", "printLongLine", 
             "printUnsignedLine", "printDoubleLine", "printStructLine", "printBytesLine",
             "writeLine", "IO.writeLine", "IO.logger.log",
+            "IP_ADDRESS", "TCP_PORT",
             
             # --- C/C++ Windows API ---
             "LoadLibrary", "LoadLibraryA", "LoadLibraryW", "FreeLibrary",
@@ -154,7 +165,20 @@ class VarRenamer(TransformationBase):
             "getDBConnection", "closeConnection",
             "add", "put", "get", "remove", "clear", "containsKey", "containsValue",
             "keySet", "entrySet", "iterator", "hasNext", "next",
-            "Properties", "getProperty", "setProperty", "load", "store"
+            "Properties", "getProperty", "setProperty", "load", "store",
+            "close", "IO", "Level", "WARNING", "IOException",
+
+            # --- C/C++ System Constants & Macros ---
+            "_WIN32", "WIN32", "_DEBUG", "NDEBUG",
+            "AF_INET", "SOCK_STREAM", "IPPROTO_TCP", "INVALID_SOCKET", "SOCKET_ERROR",
+            "NO_ERROR", "NULL", "true", "false",
+            "MAKEWORD", "HMODULE", "WSADATA", "SOCKET", "sockaddr_in", "sockaddr",
+
+            # --- C/C++ Struct Members (Common) ---
+            "sin_family", "sin_addr", "s_addr", "sin_port", "sa_family",
+            "tm_sec", "tm_min", "tm_hour", "tm_mday", "tm_mon", "tm_year", "tm_wday", "tm_yday", "tm_isdst",
+            "st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime", "st_mtime", "st_ctime",
+            "h_name", "h_aliases", "h_addrtype", "h_length", "h_addr_list", "h_addr"
         }
 
     def extract_targets(self, root, code_string):
@@ -184,11 +208,14 @@ class VarRenamer(TransformationBase):
                         is_func = False
                         
                         # Common Patterns for Function Calls/Declarations
-                        if parent_type in ["function_declarator", "method_declaration", "function_definition"]:
-                            # In declaration: "void foo(int a)" -> foo is FUNC
-                            # But we need to be careful not to catch return type
-                            # Usually the identifier in declarator is the name
-                            is_func = True
+                        if parent_type == "method_declaration":
+                            if current_node == current_node.parent.child_by_field_name("name"):
+                                is_func = True
+                        elif parent_type in ["function_declarator", "function_definition"]:
+                             if current_node == current_node.parent.child_by_field_name("declarator") or \
+                                current_node == current_node.parent.child_by_field_name("name"):
+                                 is_func = True
+                                 
                         elif parent_type in ["call_expression", "method_invocation", "invocation_expression"]:
                             # In call: "foo(1)" -> foo is FUNC
                             # In tree-sitter, the function name is usually the 'function' field or first child
@@ -326,51 +353,148 @@ class VarRenamer(TransformationBase):
 
 if __name__ == '__main__':
     # Complex Java Example with Function Call differentiation
+    # Complex Java Example from CWE111_Unsafe_JNI__console_01 (bad)
     java_code = """
-    public class Processor {
-        public void processdata(int dataId) {
-            String secret = "TOP_SECRET";
-            int magic = 42;
-            int count = 1000;
-
-            magic = 42; 
-            magic = 42;
-            magic = 42;
-            magic = 42;
-            
-            if (magic == 42) {
-                calculate(dataId); // Function Call
-                log("Processing"); // Function Call (Blacklisted)
+    public class Test {
+        public void bad() throws IOException 
+        {
+            InputStreamReader readerInputStream = null;
+            BufferedReader readerBuffered = null;
+            int intNumber = 0;
+            try
+            {
+                IO.writeLine("Enter a string: (asdf)" );
+                readerInputStream = new InputStreamReader(System.in, "UTF-8");
+                readerBuffered = new BufferedReader(readerInputStream);
+                String stringLine = readerBuffered.readLine();
+                IO.writeLine("How long was your string? (200) ");
+                intNumber = Integer.parseInt(readerBuffered.readLine());
+                IO.writeLine("Result from native method: " + test(stringLine, intNumber));  
             }
-            
-            helperFunc(secret, count); // Function Call
-        }
-        
-        private void helperFunc(String s, int n) {
-            System.out.println(s);
-        }
-        
-        private void calculate(int val) {
-            int result = val * 2;
+            catch (IOException exceptIO)
+            {
+                IO.logger.log(Level.WARNING, "Error with stream reading", exceptIO);
+                return;
+            }
+            finally 
+            {
+                try 
+                {
+                    if (readerBuffered != null) 
+                    {
+                        readerBuffered.close();
+                    }
+                }
+                catch (IOException exceptIO) 
+                {
+                    IO.logger.log(Level.WARNING, "Error closing BufferedReader", exceptIO);
+                }
+                try 
+                {
+                    if (readerInputStream != null) 
+                    {
+                        readerInputStream.close();
+                    }
+                }              
+                catch (IOException exceptIO) 
+                {
+                    IO.logger.log(Level.WARNING, "Error closing InputStreamReader", exceptIO);
+                }
+            }
         }
     }
     """
 
+    # Complex C Example from CWE114_Process_Control__w32_char_connect_socket_01_bad
     c_code = """
-    void handle_request(int req_id) {
-        char *msg = "Welcome User";
-        int timeout = 5000;
-        timeout = 5000;
-        timeout = 5000;
-        timeout = 5000;
-        float pi = 3.14;
-        
-        if (req_id > 0) {
-            send_response(msg); // FUNC
-            log_access(req_id); // FUNC
+    void CWE114_Process_Control__w32_char_connect_socket_01_bad()
+    {
+        char * data;
+        char dataBuffer[100] = "";
+        data = dataBuffer;
+        {
+    #ifdef _WIN32
+            WSADATA wsaData;
+            int wsaDataInit = 0;
+    #endif
+            int recvResult;
+            struct sockaddr_in service;
+            char *replace;
+            SOCKET connectSocket = INVALID_SOCKET;
+            size_t dataLen = strlen(data);
+            strlen(data);
+            strlen(data);
+            strlen(data);
+            do
+            {
+    #ifdef _WIN32
+                if (WSAStartup(MAKEWORD(2,2), &wsaData) != NO_ERROR)
+                {
+                    break;
+                }
+                wsaDataInit = 1;
+    #endif
+                 
+                connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+                if (connectSocket == INVALID_SOCKET)
+                {
+                    break;
+                }
+                memset(&service, 0, sizeof(service));
+                service.sin_family = AF_INET;
+                service.sin_addr.s_addr = inet_addr(IP_ADDRESS);
+                service.sin_port = htons(TCP_PORT);
+                if (connect(connectSocket, (struct sockaddr*)&service, sizeof(service)) == SOCKET_ERROR)
+                {
+                    break;
+                }
+                 
+                 
+                recvResult = recv(connectSocket, (char *)(data + dataLen), sizeof(char) * (100 - dataLen - 1), 0);
+                if (recvResult == SOCKET_ERROR || recvResult == 0)
+                {
+                    break;
+                }
+                 
+                data[dataLen + recvResult / sizeof(char)] = '\\0';
+                 
+                replace = strchr(data, '\\r');
+                if (replace)
+                {
+                    *replace = '\\0';
+                }
+                replace = strchr(data, '\\n');
+                if (replace)
+                {
+                    *replace = '\\0';
+                }
+            }
+            while (0);
+            if (connectSocket != INVALID_SOCKET)
+            {
+                CLOSE_SOCKET(connectSocket);
+            }
+    #ifdef _WIN32
+            if (wsaDataInit)
+            {
+                WSACleanup();
+            }
+    #endif
         }
-        
-        int x = compute_hash(msg, timeout); // FUNC
+        {
+            HMODULE hModule;
+             
+            hModule = LoadLibraryA(data);
+            if (hModule != NULL)
+            {
+                FreeLibrary(hModule);
+                printLine("Library loaded and freed successfully");
+            }
+            else
+            {
+                printLine("Unable to load library");
+            }
+        }
     }
     """
     
