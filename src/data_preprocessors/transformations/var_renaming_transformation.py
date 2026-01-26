@@ -255,16 +255,33 @@ class VarRenamer(TransformationBase):
         return targets
 
     def var_renaming(self, code_string):
-        root = self.parse_code(code_string)
+        # 1. Parsing & Analysis Strategy
+        # For Java, if the code snippet is just a method without a class, Tree-sitter often fails to identify 'method_declaration'.
+        # We assume if no 'class/interface/enum' keyword is found at top level, we wrap it.
+        analysis_code = code_string
+        if self.language == 'java':
+            # Simple heuristic: check if typical class decl pattern exists
+            # If not, wrap in a dummy class to help the parser identify methods correctly.
+            if not re.search(r'\b(class|interface|enum)\s+\w+', code_string):
+                analysis_code = f"public class AnalysisWrapper {{ {code_string} }}"
+
+        analysis_root = self.parse_code(analysis_code)
         
-        # 1. Identify targets
-        targets = self.extract_targets(root, code_string)
+        # 1. Identify targets using the potentially wrapped code
+        targets = self.extract_targets(analysis_root, analysis_code)
         
         # Unique identifying to generate maps
         vars_found = list(set([t[0] for t in targets if t[1] == 'VAR']))
         funcs_found = list(set([t[0] for t in targets if t[1] == 'FUNC']))
         strs_found = list(set([t[0] for t in targets if t[1] == 'STR']))
         nums_found = list(set([t[0] for t in targets if t[1] == 'NUM']))
+        
+        # Create Mappings
+        # Remove wrapper-specific artifacts if any (AnalysisWrapper might be caught as VAR/CLASS)
+        if "AnalysisWrapper" in vars_found: vars_found.remove("AnalysisWrapper")
+
+        
+        root = self.parse_code(code_string) # Re-parse original code for replacement walk
         
         # Create Mappings
         replacement_map = {}

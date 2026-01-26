@@ -33,7 +33,7 @@ def create_transformers_from_conf_file():
         DeadCodeInserter: 1,
         ForWhileTransformer: 1,
         OperandSwap: 1,
-        VarRenamer: 1
+        VarRenamer: 0
     }
 
 # --------------------------------------------------------------------------- #
