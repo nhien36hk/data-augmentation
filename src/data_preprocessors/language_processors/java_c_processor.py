@@ -12,6 +12,7 @@ class JavaAndCPPProcessor:
         control_variable = "_i_" + str(np.random.choice(list(range(10))))
         p = np.random.uniform(0, 1)
         if p < 0.5:
+            # Defines the variable, so this is valid C99+/Java/C++
             prefix = "for ( int " + control_variable + " = 0 ; " + control_variable + " > 0 ; " + control_variable + \
                      " ++ ) { "
             loop = prefix + body + " } "
@@ -22,24 +23,24 @@ class JavaAndCPPProcessor:
     @classmethod
     def create_dead_while_loop(cls, body):
         p = np.random.uniform(0, 1)
-        control_variable = "_i_" + str(np.random.choice(list(range(10))))
+        # Use constants to avoid "undeclared identifier" errors
         if p < 0.33:
             return "while ( false ) { " + body + " }"
         elif p < 0.66:
-            return "while ( " + control_variable + " < " + control_variable + " ) { " + body + " } "
+            return "while ( 0 < 0 ) { " + body + " } "
         else:
-            return "while ( " + control_variable + " > " + control_variable + " ) { " + body + " } "
+            return "while ( 0 > 1 ) { " + body + " } "
 
     @classmethod
     def create_dead_if(cls, body):
         p = np.random.uniform(0, 1)
-        control_variable = "_i_" + str(np.random.choice(list(range(10))))
+        # Use constants to avoid "undeclared identifier" errors
         if p < 0.33:
             return "if ( false ) { " + body + " }"
         elif p < 0.66:
-            return "if ( " + control_variable + " < " + control_variable + " ) { " + body + " } "
+            return "if ( 0 < 0 ) { " + body + " } "
         else:
-            return "if ( " + control_variable + " > " + control_variable + " ) { " + body + " } "
+            return "if ( 0 > 1 ) { " + body + " } "
 
     @classmethod
     def for_to_while_random(cls, code_string, parser):
@@ -98,10 +99,56 @@ class JavaAndCPPProcessor:
 
     @classmethod
     def beautify_java_code(cls, tokens):
-        code = " ".join(tokens)
-        code = re.sub(" \\. ", "", code)
-        code = re.sub(" \\+\\+", "++", code)
-        return code
+        # Heuristic beautification to avoid single-line output
+        code = ""
+        indent_level = 0
+        indent_str = "    "
+        paren_depth = 0  # Track parenthesis depth to avoid breaking lines inside (for loops)
+        
+        # Token-based reconstruction with newline logic
+        for i, token in enumerate(tokens):
+            if token == "{":
+                code += " {\n"
+                indent_level += 1
+                code += indent_str * indent_level
+            elif token == "}":
+                indent_level = max(0, indent_level - 1)
+                code += "\n" + (indent_str * indent_level) + "}"
+                # Add newline after closing brace unless followed by another closing brace or else/catch
+                if i + 1 < len(tokens) and tokens[i+1] not in ["}", "else", "catch", ";"]:
+                    code += "\n" + (indent_str * indent_level)
+            elif token == "(":
+                code += " ("
+                paren_depth += 1
+            elif token == ")":
+                code += ")"
+                paren_depth = max(0, paren_depth - 1)
+            elif token == ";":
+                code += ";"
+                # Only newline if NOT inside parentheses (e.g. for loop header)
+                if paren_depth == 0:
+                    code += "\n" + (indent_str * indent_level)
+            else:
+                # Add space before token if not at start of line and previous token wasn't open paren/bracket logic (simplified)
+                if len(code) > 0 and code[-1] not in [" ", "\n", "("]:
+                     code += " "
+                code += token
+
+        # Post-process cleanup
+        code = re.sub(r"\s*\.\s*", ".", code)      # Fix "obj . method" or "obj. method" -> "obj.method"
+        code = re.sub(r"\s+\+\+", "++", code)      # Fix "i ++" -> "i++"
+        code = re.sub(r"\(\s+", "(", code)         # Fix "( expr" -> "(expr"
+        code = re.sub(r"\s+\)", ")", code)         # Fix "expr )" -> "expr)"
+        code = re.sub(r"\s+;", ";", code)          # Fix " ;" -> ";"
+        code = re.sub(r"\s*\[\s*", "[", code)      # Fix "arr [ i ]" -> "arr[i"
+        code = re.sub(r"\s*\]", "]", code)         # Fix "i ]" -> "i]"
+        code = re.sub(r"\s*,\s*", ", ", code)      # Fix "a , b" -> "a, b"
+        # Fix space after open paren created by heuristic
+        code = re.sub(r" \(", "(", code)
+        # Ensure space before open brace
+        code = re.sub(r"([^\s])\{", r"\1 {", code)
+        
+        return code.strip()
 
     @classmethod
     def get_tokens_replace_for(cls, code_str, for_node, root, init, cond, update, body):
@@ -109,7 +156,9 @@ class JavaAndCPPProcessor:
             code_str = code_str.encode()
         assert isinstance(root, Node)
         tokens = []
-        if root.type == "comment":
+        if "comment" in str(root.type):
+            comment_content = code_str[root.start_byte:root.end_byte].decode().strip()
+            tokens.append(comment_content + "\n")
             return tokens
         if "string" in str(root.type):
             return [code_str[root.start_byte:root.end_byte].decode()]
@@ -167,34 +216,86 @@ class JavaAndCPPProcessor:
             code_str = code_str.encode()
         assert isinstance(root, Node)
         tokens = []
-        if root.type == "comment":
+        
+        # Handling comments: ensure they are followed by newline to not consume next code
+        if "comment" in str(root.type): # Matches "comment", "line_comment", "block_comment"
+            comment_content = code_str[root.start_byte:root.end_byte].decode().strip()
+            tokens.append(comment_content + "\n")
             return tokens
+            
         if "string" in str(root.type):
             parent = root.parent
             if len(parent.children) == 1:
                 return tokens
             else:
                 return [code_str[root.start_byte:root.end_byte].decode()]
-        if root in insert_before_node:
+        
+        # INSERTION LOGIC ----------------------------------------------------
+        # Special case: If we are inserting before a node, we must check if that node
+        # is a direct child of a control statement (if, while, etc.) but NOT a block.
+        # If so, we must upgrade the single statement to a block { ... } to hold both
+        # the insertion code (update) and the original statement (break/continue).
+        
+        should_insert = root in insert_before_node
+        
+        # Check if we need to wrap in braces
+        # We need wrapping if we are inserting AND the parent is an IF/ELSE/WHILE/FOR
+        # but the parent is NOT a compound_statement/block.
+        needs_block_wrap = False
+        if should_insert and root.parent:
+            ptype = str(root.parent.type)
+            if ptype in ["if_statement", "while_statement", "for_statement", "else_clause"] or ptype.endswith("_statement"):
+                # If the parent expects a statement and we are replacing a single statement
+                # with multiple statments (insertion + original), we must wrap.
+                # However, usually the parser sees the block as a child.
+                # If 'root' is NOT a block/compound_statement, we wrap.
+                if str(root.type) not in ["compound_statement", "block"]:
+                    needs_block_wrap = True
+
+        if should_insert:
+            if needs_block_wrap:
+                tokens.append("{")
+            
             tokens += insertion_code.split()
+            
+            # If we wrap, the insertion code is inside the block.
+            # Then we process the root (the break/continue statement).
+        
         children = root.children
         if len(children) == 0:
+            # Leaf node
             tokens.append(code_str[root.start_byte:root.end_byte].decode())
-        for child in children:
-            ts = cls.get_tokens_insert_before(code_str, child, insertion_code, insert_before_node)
-            tokens += ts
+        else:
+            # Recursive processing
+            for child in children:
+                ts = cls.get_tokens_insert_before(code_str, child, insertion_code, insert_before_node)
+                tokens += ts
+        
+        if should_insert and needs_block_wrap:
+            tokens.append("}")
+            
         return tokens
 
     @classmethod
     def get_breaking_statements(cls, block):
-        breakings = ['continue_statement', 'break_statement', 'return_statement']
+        # We only care about 'continue' statements for inserting loop updates (e.g. i++).
+        # 'break' and 'return' exit the loop immediately without running the update step in a for-loop,
+        # so we should NOT insert updates before them.
+        breakings = ['continue_statement']
+        
+        # Stop traversing into nested loops, because their 'continue'/'break' belong to them (unless labeled, but simple heuristic first)
+        loop_types = ['for_statement', 'while_statement', 'do_statement']
+        
         statements = []
         stack = [block]
         while len(stack) > 0:
             top = stack.pop()
             if str(top.type) in breakings:
                 statements.append(top)
-            else:
+            
+            # Use 'children' for traversal
+            # But do NOT traverse into nested loops
+            if str(top.type) not in loop_types:
                 for child in top.children:
                     stack.append(child)
         return statements
@@ -259,7 +360,9 @@ class JavaAndCPPProcessor:
             code_str = code_str.encode()
         assert isinstance(root, Node)
         tokens = []
-        if root.type == "comment":
+        if "comment" in str(root.type):
+            comment_content = code_str[root.start_byte:root.end_byte].decode().strip()
+            tokens.append(comment_content + "\n")
             return tokens
         if "string" in str(root.type):
             return [code_str[root.start_byte:root.end_byte].decode()]
@@ -276,46 +379,144 @@ class JavaAndCPPProcessor:
         return tokens
 
     # -----Confusion removal C------
+    # -----Confusion removal C------
     @classmethod
     def conditional_removal(cls, code_string, parser):
         # This function is for C, equavalent to extract_ternary_expression for Java
         root = parser.parse_code(code_string)
-        assi_cond_expr, varde_cond_expr, ret_cond_expr = cls.extract_conditional_expression(root)
-        success = False
-        if len(assi_cond_expr) > 0:
+        assi_con_expr, varde_con_expr, ret_con_expr = cls.extract_conditional_expression(root)
+        
+        replacements = []
+        if isinstance(code_string, str):
+            code_bytes = code_string.encode('utf-8')
+        else:
+            code_bytes = code_string
+            
+        # 1. Assignment Conditional
+        for node in assi_con_expr:
             try:
-                modified_tokens = cls.assignment_conditional_removal(code_string, assi_cond_expr, root, parser)
-                code_string = cls.beautify_java_code(modified_tokens)
-                root = parser.parse_code(code_string)
-                success = True
-                _, varde_cond_expr, ret_cond_expr = cls.extract_conditional_expression(root)
+                # node could be expression_statement or assignment_expression
+                # Find the assignment_expression that contains the conditional
+                assign_expr = None
+                if str(node.type) == 'expression_statement':
+                    # Children: [assignment_expression, ;]
+                    for child in node.children:
+                        if str(child.type) == 'assignment_expression':
+                            assign_expr = child
+                            break
+                elif str(node.type) == 'assignment_expression':
+                    assign_expr = node
+                
+                if not assign_expr or len(assign_expr.children) < 3:
+                    continue
+                
+                assignee = assign_expr.children[0]
+                right = assign_expr.children[2]
+                
+                if str(right.type) != 'conditional_expression':
+                    continue
+                
+                cond_expr = right
+                cond = cond_expr.child_by_field_name('condition')
+                conseq = cond_expr.child_by_field_name('consequence')
+                alt = cond_expr.child_by_field_name('alternative')
+                
+                if not (cond and conseq and alt):
+                     cond = cond_expr.children[0]
+                     conseq = cond_expr.children[2]
+                     alt = cond_expr.children[4]
+
+                assignee_text = code_bytes[assignee.start_byte:assignee.end_byte].decode()
+                cond_text = code_bytes[cond.start_byte:cond.end_byte].decode()
+                if cond.type != 'parenthesized_expression': cond_text = f"({cond_text})"
+                
+                true_text = code_bytes[conseq.start_byte:conseq.end_byte].decode()
+                false_text = code_bytes[alt.start_byte:alt.end_byte].decode()
+                
+                new_text = f"if {cond_text} {{ {assignee_text} = {true_text}; }} else {{ {assignee_text} = {false_text}; }}"
+                replacements.append((node.start_byte, node.end_byte, new_text))
             except:
-                # print("assignment ternary expression removal failed.")
                 pass
+                
+        # 2. Variable Declaration (init_declarator)
+        for node in varde_con_expr:
+             # node is declaration (parent of init_declarator)
+             
+             # Check for multiple declarators
+             declarators = [c for c in node.children if c.type == 'init_declarator']
+             if len(declarators) > 1: continue
 
+             for child in node.children:
+                 if child.type == 'init_declarator':
+                     try:
+                         # init_declarator: [declarator, =, value]
+                         if len(child.children) < 3: continue
+                         val = child.children[2]
+                         if val.type != 'conditional_expression': continue
+                         
+                         assignee = child.children[0]
+                         cond_expr = val
+                         
+                         cond = cond_expr.child_by_field_name('condition')
+                         conseq = cond_expr.child_by_field_name('consequence')
+                         alt = cond_expr.child_by_field_name('alternative')
+                         
+                         if not (cond and conseq and alt):
+                             cond = cond_expr.children[0]
+                             conseq = cond_expr.children[2]
+                             alt = cond_expr.children[4]
+                             
+                         # Preserve modifiers/type using prefix
+                         prefix = code_bytes[node.start_byte:child.start_byte].decode()
+                         assignee_text = code_bytes[assignee.start_byte:assignee.end_byte].decode()
+                         
+                         cond_text = code_bytes[cond.start_byte:cond.end_byte].decode()
+                         if cond.type != 'parenthesized_expression': cond_text = f"({cond_text})"
+                         
+                         true_text = code_bytes[conseq.start_byte:conseq.end_byte].decode()
+                         false_text = code_bytes[alt.start_byte:alt.end_byte].decode()
+                         
+                         new_text = f"{prefix}{assignee_text}; if {cond_text} {{ {assignee_text} = {true_text}; }} else {{ {assignee_text} = {false_text}; }}"
+                         replacements.append((node.start_byte, node.end_byte, new_text))
 
-        if len(varde_cond_expr) > 0:
+                     except:
+                         pass
+
+        # 3. Return Statement
+        for node in ret_con_expr:
             try:
-                modified_tokens = cls.var_decl_ternary_removal(code_string, varde_cond_expr, root, parser)
-                code_string = cls.beautify_java_code(modified_tokens)
-                root = parser.parse_code(code_string)
-                success = True
-                _, _, ret_cond_expr = cls.extract_conditional_expression(root)
+                # return expr;
+                # children: [return, expr, ;]
+                if len(node.children) < 2: continue
+                expr = node.children[1]
+                if expr.type != 'conditional_expression': continue
+                
+                cond_expr = expr
+                cond = cond_expr.child_by_field_name('condition')
+                conseq = cond_expr.child_by_field_name('consequence')
+                alt = cond_expr.child_by_field_name('alternative')
+                
+                if not (cond and conseq and alt):
+                     cond = cond_expr.children[0]
+                     conseq = cond_expr.children[2]
+                     alt = cond_expr.children[4]
+                     
+                cond_text = code_bytes[cond.start_byte:cond.end_byte].decode()
+                if cond.type != 'parenthesized_expression': cond_text = f"({cond_text})"
+                
+                true_text = code_bytes[conseq.start_byte:conseq.end_byte].decode()
+                false_text = code_bytes[alt.start_byte:alt.end_byte].decode()
+                
+                new_text = f"if {cond_text} {{ return {true_text}; }} else {{ return {false_text}; }}"
+                replacements.append((node.start_byte, node.end_byte, new_text))
             except:
-                # print("variable declaration ternary expression removal failed.")
                 pass
+                
+        if replacements:
+            new_code = cls.apply_replacements(code_string, replacements)
+            return parser.parse_code(new_code), new_code, True
 
-        if len(ret_cond_expr) > 0:
-            try:
-                modified_tokens = cls.return_ternary_removal(code_string, ret_cond_expr, root, parser)
-                code_string = cls.beautify_java_code(modified_tokens)
-                root = parser.parse_code(code_string)
-                success = True
-            except:
-                # print("return ternary expression removal failed.")
-                pass
-
-        return root, code_string, success
+        return root, code_string, False
 
     @classmethod
     def assignment_conditional_removal(cls, code_string, assi_tern_expr, root, parser):
@@ -352,15 +553,30 @@ class JavaAndCPPProcessor:
         while len(queue) > 0:
             current_node = queue[0]
             queue = queue[1:]
-            if str(current_node.type) == 'conditional_expression' and str(
-                    current_node.children[0].type) == "assignment_expression":
-                assi_con_expr.append(current_node.parent)  # include the ";" for now and later we skip it
-            if str(current_node.type) == 'conditional_expression' and str(
-                    current_node.parent.type) == "init_declarator":
-                varde_con_expr.append(current_node.parent.parent)  # node type: declaration
-            if str(current_node.type) == 'conditional_expression' and str(
-                    current_node.parent.type) == "return_statement":
-                ret_con_expr.append(current_node.parent)
+            
+            # Check for conditional_expression (ternary operator)
+            if str(current_node.type) == 'conditional_expression':
+                parent = current_node.parent
+                parent_type = str(parent.type) if parent else ""
+                
+                # Case 1: Assignment expression: a = cond ? x : y;
+                # Parent is assignment_expression, and conditional is on the right side
+                if parent_type == "assignment_expression":
+                    # Get the grandparent (expression_statement) for replacement
+                    grandparent = parent.parent
+                    if grandparent and str(grandparent.type) == "expression_statement":
+                        assi_con_expr.append(grandparent)
+                    else:
+                        assi_con_expr.append(parent)
+                
+                # Case 2: Variable declaration: int x = cond ? a : b;
+                elif parent_type == "init_declarator":
+                    varde_con_expr.append(parent.parent)  # node type: declaration
+                
+                # Case 3: Return statement: return cond ? a : b;
+                elif parent_type == "return_statement":
+                    ret_con_expr.append(parent)
+            
             for child in current_node.children:
                 queue.append(child)
         return assi_con_expr, varde_con_expr, ret_con_expr
@@ -368,66 +584,158 @@ class JavaAndCPPProcessor:
     # -----Confusion removal Java------
     # TODO: Check whether java/C/CPP have the same "ternary_expression" node type
     @classmethod
+    def apply_replacements(cls, code_string, replacements):
+        if isinstance(code_string, str):
+            code_bytes = bytearray(code_string, 'utf-8')
+        else:
+            code_bytes = bytearray(code_string)
+        
+        # Sort replacements by start_byte descending to avoid offset issues
+        # replacements is list of (start, end, new_bytes)
+        replacements.sort(key=lambda x: x[0], reverse=True)
+
+        for start, end, new_text in replacements:
+            if isinstance(new_text, str):
+                new_text = new_text.encode('utf-8')
+            code_bytes[start:end] = new_text
+            
+        return code_bytes.decode('utf-8')
+
+    # -----Confusion removal Java------
+    @classmethod
     def ternary_removal(cls, code_string, parser):
-        code_string = cls.remove_package_and_import(code_string)  # TODO: Check whether this will mess up the code
+        # code_string = cls.remove_package_and_import(code_string) # Avoid removing imports for now
         root = parser.parse_code(code_string)
         assi_tern_expr, varde_tern_expr, ret_tern_expr = cls.extract_ternary_expression(root)
-        success = False
-        if len(assi_tern_expr) > 0:
-            try:
-                modified_tokens = cls.assignment_ternary_removal(code_string, assi_tern_expr, root, parser)
-                code_string = cls.beautify_java_code(modified_tokens)
-                root = parser.parse_code(code_string)
-                success = True
-                _, varde_tern_expr, ret_tern_expr = cls.extract_ternary_expression(root)
-            except:
-                # print("assignment ternary expression removal failed.")
-                pass
-
-        if len(varde_tern_expr) > 0:
-            try:
-                modified_tokens = cls.var_decl_ternary_removal(code_string, varde_tern_expr, root, parser)
-                code_string = cls.beautify_java_code(modified_tokens)
-                root = parser.parse_code(code_string)
-                success = True
-                _, _, ret_tern_expr = cls.extract_ternary_expression(root)
-            except:
-                pass
-                # print("variable declaration ternary expression removal failed.")
-
-
-        if len(ret_tern_expr) > 0:
-            try:
-                modified_tokens = cls.return_ternary_removal(code_string, ret_tern_expr, root, parser)
-                code_string = cls.beautify_java_code(modified_tokens)
-                root = parser.parse_code(code_string)
-                success = True
-            except:
-                pass
-                # print("return ternary expression removal failed.")
-
-        return root, code_string, success
-
-    @classmethod
-    def ternary_body_write(cls, body, code_string, assignee, tokens, ret=False):
-        body_children = body.children
-        condition_tokens = get_tokens(code_string, body_children[0])
-        if str(body_children[0].type) == 'parenthesized_expression':
-            condition_tokens = condition_tokens[1:-1]
-        br1_tokens = get_tokens(code_string, body_children[2])
-        if str(body_children[2].type) == 'parenthesized_expression':
-            br1_tokens = br1_tokens[1:-1]
-        br2_tokens = get_tokens(code_string, body_children[4])
-        if str(body_children[4].type) == 'parenthesized_expression':
-            br2_tokens = br2_tokens[1:-1]
-        assignee_token = get_tokens(code_string, assignee)[0]
-        if ret:  # in return statement, assignee is the keyword "return"
-            tokens.extend(["if", "("] + condition_tokens + [")", "{", assignee_token] + br1_tokens +
-                          [";", "}", "else", "{", assignee_token] + br2_tokens + [";", "}"])
+        
+        replacements = []
+        
+        if isinstance(code_string, str):
+            code_bytes = code_string.encode('utf-8')
         else:
-            tokens.extend(["if", "("] + condition_tokens + [")", "{", assignee_token, "="] + br1_tokens +
-                          [";", "}", "else", "{", assignee_token, "="] + br2_tokens + [";", "}"])
-        return tokens
+            code_bytes = code_string
+            
+        # 1. Assignment Ternary
+        for node in assi_tern_expr:
+            # node is assignment_expression
+            # children: [assignee, =, ternary_expr]
+            # ternary_expr children: [cond, ?, true_val, :, false_val]
+            try:
+                children = node.children
+                if len(children) < 3: continue
+                assignee = children[0]
+                ternary = children[2]
+                if ternary.type != 'ternary_expression': continue
+                
+                cond = ternary.child_by_field_name('condition')
+                conseq = ternary.child_by_field_name('consequence')
+                alt = ternary.child_by_field_name('alternative')
+                
+                if not (cond and conseq and alt):
+                     # Fallback to index if fields missing
+                     cond = ternary.children[0]
+                     conseq = ternary.children[2]
+                     alt = ternary.children[4]
+                
+                assignee_text = code_bytes[assignee.start_byte:assignee.end_byte].decode()
+                cond_text = code_bytes[cond.start_byte:cond.end_byte].decode()
+                
+                # Check formatting of condition
+                if cond.type == 'parenthesized_expression':
+                     # keep parens
+                     pass
+                else:
+                     cond_text = f"({cond_text})"
+                     
+                true_text = code_bytes[conseq.start_byte:conseq.end_byte].decode()
+                false_text = code_bytes[alt.start_byte:alt.end_byte].decode()
+                
+                new_text = f"if {cond_text} {{ {assignee_text} = {true_text}; }} else {{ {assignee_text} = {false_text}; }}"
+                
+                replacements.append((node.start_byte, node.end_byte, new_text))
+            except:
+                pass
+
+        # 2. Variable Declaration Ternary
+        for node in varde_tern_expr:
+            # node is local_variable_declaration (or similar parent) containing the declarator
+            
+            # Check for multiple declarators to avoid side effects
+            declarators = [c for c in node.children if c.type in ["variable_declarator", "init_declarator"]]
+            if len(declarators) > 1: continue
+
+            # We iterate children to find the specific declarator with ternary
+            for child in node.children:
+                if child.type in ["variable_declarator", "init_declarator"]:
+                    # Child: [name, =, ternary]
+                    try:
+                        decl_children = child.children
+                        if len(decl_children) < 3: continue
+                        if decl_children[-1].type != 'ternary_expression': continue
+                        
+                        assignee = decl_children[0]
+                        ternary = decl_children[-1]
+                        
+                        cond = ternary.child_by_field_name('condition')
+                        conseq = ternary.child_by_field_name('consequence') 
+                        alt = ternary.child_by_field_name('alternative')
+                        
+                        if not (cond and conseq and alt):
+                             cond = ternary.children[0]
+                             conseq = ternary.children[2]
+                             alt = ternary.children[4]
+
+                        assignee_text = code_bytes[assignee.start_byte:assignee.end_byte].decode() 
+                        
+                        # Preserve type + modifiers by taking everything before the declarator
+                        prefix = code_bytes[node.start_byte:child.start_byte].decode()
+                        # prefix usually ends with space. Clean if needed but usually fine.
+                        
+                        cond_text = code_bytes[cond.start_byte:cond.end_byte].decode()
+                        if cond.type != 'parenthesized_expression': cond_text = f"({cond_text})"
+                        
+                        true_text = code_bytes[conseq.start_byte:conseq.end_byte].decode()
+                        false_text = code_bytes[alt.start_byte:alt.end_byte].decode()
+                        
+                        new_text = f"{prefix}{assignee_text}; if {cond_text} {{ {assignee_text} = {true_text}; }} else {{ {assignee_text} = {false_text}; }}"
+                        
+                        replacements.append((node.start_byte, node.end_byte, new_text))
+                    except:
+                        pass
+
+        # 3. Return Ternary
+        for node in ret_tern_expr:
+            # node is return_statement
+            try:
+                ternary = node.children[1] # return EXPR ;
+                if ternary.type != 'ternary_expression': continue
+                
+                cond = ternary.child_by_field_name('condition')
+                conseq = ternary.child_by_field_name('consequence')
+                alt = ternary.child_by_field_name('alternative')
+                
+                if not (cond and conseq and alt):
+                     cond = ternary.children[0]
+                     conseq = ternary.children[2]
+                     alt = ternary.children[4]
+                     
+                cond_text = code_bytes[cond.start_byte:cond.end_byte].decode()
+                if cond.type != 'parenthesized_expression': cond_text = f"({cond_text})"
+                
+                true_text = code_bytes[conseq.start_byte:conseq.end_byte].decode()
+                false_text = code_bytes[alt.start_byte:alt.end_byte].decode()
+                
+                new_text = f"if {cond_text} {{ return {true_text}; }} else {{ return {false_text}; }}"
+                
+                replacements.append((node.start_byte, node.end_byte, new_text))
+            except:
+                pass
+        
+        if replacements:
+            new_code = cls.apply_replacements(code_string, replacements)
+            return parser.parse_code(new_code), new_code, True
+            
+        return root, code_string, False
 
     @classmethod
     def assignment_ternary_removal(cls, code_string, assi_tern_expr, root, parser):
@@ -523,35 +831,80 @@ class JavaAndCPPProcessor:
         return assi_ten_expr, varde_ten_expr, ret_ten_expr
 
     # -----Post increment/decrement removal------
+    # -----Post increment/decrement removal------
     @classmethod
     def incre_decre_removal(cls, code_string, parser):
-        # code_string = cls.remove_package_and_import(code_string)  # TODO: Check whether this will mess up the code
+        # code_string = cls.remove_package_and_import(code_string)
         root = parser.parse_code(code_string)
         pre_expr, post_expr = cls.extract_incre_decre_expression(root, code_string)
-        success = False
-        if len(pre_expr) > 0:
+        
+        replacements = []
+        if isinstance(code_string, str):
+            code_bytes = code_string.encode('utf-8')
+        import re 
+        # Ensure code_bytes is bytes-like for slicing
+        if isinstance(code_bytes, str): code_bytes = code_bytes.encode('utf-8') 
+        
+        # 1. Pre-Increment: x = ++y -> y+=1; x=y;
+        for node in pre_expr:
             try:
-                modified_tokens = cls.pre_incre_decre_removal(code_string, pre_expr, root, parser)
-                code_string = cls.beautify_java_code(modified_tokens)
-                root = parser.parse_code(code_string)
-                success = True
-                _, post_expr = cls.extract_incre_decre_expression(root, code_string)
+                # node is expression_statement
+                # children: [assignment_expression, ;]
+                assign = node.children[0]
+                if assign.type != 'assignment_expression': continue
+                
+                # assign children: [left, =, right]
+                left = assign.children[0]
+                right = assign.children[2]
+                
+                # right is prefix_update (e.g. ++y)
+                # children: [++, operand]
+                if len(right.children) < 2: continue
+                op_node = right.children[0] # ++ or --
+                operand = right.children[1]
+                
+                op_str = code_bytes[op_node.start_byte:op_node.end_byte].decode()
+                arith_op = "+=" if "++" in op_str else "-="
+                
+                left_text = code_bytes[left.start_byte:left.end_byte].decode()
+                operand_text = code_bytes[operand.start_byte:operand.end_byte].decode()
+                
+                new_text = f"{operand_text} {arith_op} 1; {left_text} = {operand_text};"
+                replacements.append((node.start_byte, node.end_byte, new_text))
             except:
                 pass
-                # print("pre incre/decre expression removal failed.")
 
-
-        if len(post_expr) > 0:
+        # 2. Post-Increment: x = y++ -> x=y; y+=1;
+        for node in post_expr:
             try:
-                modified_tokens = cls.post_incre_decre_removal(code_string, post_expr, root, parser)
-                code_string = cls.beautify_java_code(modified_tokens)
-                root = parser.parse_code(code_string)
-                success = True
+                assign = node.children[0]
+                if assign.type != 'assignment_expression': continue
+                
+                left = assign.children[0]
+                right = assign.children[2]
+                
+                # right is postfix_update (e.g. y++)
+                # children: [operand, ++]
+                if len(right.children) < 2: continue
+                operand = right.children[0]
+                op_node = right.children[1]
+                
+                op_str = code_bytes[op_node.start_byte:op_node.end_byte].decode()
+                arith_op = "+=" if "++" in op_str else "-="
+                
+                left_text = code_bytes[left.start_byte:left.end_byte].decode()
+                operand_text = code_bytes[operand.start_byte:operand.end_byte].decode()
+                
+                new_text = f"{left_text} = {operand_text}; {operand_text} {arith_op} 1;"
+                replacements.append((node.start_byte, node.end_byte, new_text))
             except:
                 pass
-                # print("post incre/decre expression removal failed.")
-
-        return root, code_string, success
+                
+        if replacements:
+            new_code = cls.apply_replacements(code_string, replacements)
+            return parser.parse_code(new_code), new_code, True
+            
+        return root, code_string, False
 
     @classmethod
     def pre_incre_decre_removal(cls, code_string, pre_expr, root, parser):
@@ -852,65 +1205,18 @@ class JavaAndCPPProcessor:
 
     @classmethod
     def block_swap_java(cls, code_str, parser):
-        code = code_str.encode()
-        root = parser.parse_code(code)
-        operator_list = ['<', '>', '<=', '>=', '==', '!=']
-        pair = cls.extract_if_else(root, code, operator_list)
-        success = False
-        lst = list(range(0, len(pair)))
-        try:
-            while not success and len(lst) > 0:
-                selected = np.random.choice(lst)
-                lst.remove(selected)
-                clause = pair[selected][0]
-                des = pair[selected][1]
-                st = [des]
-                nodes = []
-                while len(st) > 0:
-                    root1 = st.pop()
-                    if len(root1.children) == 0:
-                        nodes.append(root1)
-                        if (code[root1.start_byte:root1.end_byte].decode()) in operator_list:
-                            opt_node = root1
-                            break
-                    for child in root1.children:
-                        st.append(child)
-
-                nodes = clause.children
-
-                flag = 0
-                for current_node in nodes:
-                    if str(current_node.type) == 'block':
-                        if flag == 0:
-                            first_block = current_node
-                            flag = 1
-                        else:
-                            second_block = current_node
-
-                flagx = 0
-                flagy = 0
-                try:
-                    code_list = \
-                        cls.get_tokens_for_blockswap(code, root, first_block, opt_node, second_block, flagx, flagy)[0]
-                    code_string = ""
-                    for w in code_list:
-                        code_string = code_string + w + " "
-                    code_string = code_string.strip()
-                    success = True
-                except:
-                    success = False
-                    continue
-        except:
-            pass
-        if not success:
-            code_string = cls.beautify_java_code(get_tokens(code_str, root))
-        return code_string, success
+        """
+        Swap if/else blocks for Java. 
+        Reuses the robust C/C++ implementation as the Tree-sitter structure for if-else is compatible.
+        preserves formatting.
+        """
+        return cls.block_swap_c(code_str, parser)
 
     @classmethod
     def block_swap_c(cls, code_str, parser):
         """
         Swap if/else blocks while negating the comparison operator to preserve semantics.
-        Simplified for current tree-sitter C/C++ AST (v0.20.x).
+        Supports both C (typically uses else_clause) and C++ (typically flat if structure) ASTs.
         """
         if isinstance(code_str, bytes):
             code_bytes = code_str
@@ -928,40 +1234,86 @@ class JavaAndCPPProcessor:
             "!=": "==",
         }
 
-        def find_if_with_else(node):
+        def find_swappable_if(node):
             queue = [node]
             while queue:
                 cur = queue.pop(0)
                 if cur.type == "if_statement":
+                    conseq = cur.child_by_field_name("consequence")
+                    alt = cur.child_by_field_name("alternative")
+                    cond = cur.child_by_field_name("condition")
+                    
+                    # Manual scan if fields are missing (common in some grammar versions)
                     children = cur.children
-                    # expected order: 'if', condition, consequence, else_clause
-                    if len(children) >= 4 and children[3].type == "else_clause":
-                        return cur
+                    
+                    # Find condition if missing
+                    if not cond:
+                        for child in children:
+                            if child.type in ["condition_clause", "parenthesized_expression"]:
+                                cond = child
+                                break
+                                
+                    # Find consequence if missing (usually after condition)
+                    if not conseq and cond:
+                        # Consequence is typically the next named sibling or block
+                        found_cond = False
+                        for child in children:
+                            if child == cond:
+                                found_cond = True
+                                continue
+                            if found_cond and child.type == "compound_statement":
+                                conseq = child
+                                break
+
+                    # Find alternative (else block)
+                    else_block = None
+                    if alt:
+                        if alt.type == "else_clause":
+                            # Extract actual block from else_clause
+                            for grandchild in alt.children:
+                                if grandchild.type == "compound_statement" or grandchild.type == "if_statement" or grandchild.type == "block":
+                                    else_block = grandchild
+                                    break
+                            if not else_block and len(alt.children) > 0:
+                                else_block = alt.children[-1]
+                        else:
+                            else_block = alt
+                    else:
+                        # Manual scan for 'else' keyword
+                        for i, child in enumerate(children):
+                            if child.type == "else" or child.type == "else_clause":
+                                if child.type == "else_clause":
+                                    # Recursive check for else_clause
+                                    for grandchild in child.children:
+                                        if grandchild.type in ["compound_statement", "block", "if_statement"]:
+                                            else_block = grandchild
+                                    if not else_block: else_block = child.children[-1]
+                                elif i + 1 < len(children):
+                                    else_block = children[i+1]
+                                break
+                    
+                    if cond and conseq and else_block:
+                        return cur, cond, conseq, else_block
+
                 queue.extend(cur.children)
-            return None
+            return None, None, None, None
 
         success = False
-        if_node = find_if_with_else(root)
+        if_node, cond_node, conseq_node, else_block = find_swappable_if(root)
+        
         if if_node:
             try:
-                children = if_node.children
-                cond_node = children[1]
-                conseq_node = children[2]
-                else_clause = children[3]
-                # else_clause children: 'else', block
-                alt_block = else_clause.children[-1]
-
-                # Extract binary expression inside parentheses
+                # Extract binary expression
                 cond_expr = cond_node
-                if cond_expr.type == "condition_clause":
-                    # condition_clause: '(', binary_expression, ')'
-                    if len(cond_expr.children) >= 2:
-                        cond_expr = cond_expr.children[1]
-                if cond_expr.type == "parenthesized_expression" and len(cond_expr.children) >= 2:
-                    cond_expr = cond_expr.children[1]
+                if cond_expr.type in ["condition_clause", "parenthesized_expression"] and len(cond_expr.children) >= 2:
+                     # Usually child[1] is the expression inside ( expr )
+                     cond_expr = cond_expr.children[1]
+                
+                # Check for binary expression
                 if cond_expr.type == "binary_expression" and len(cond_expr.children) >= 3:
                     left, op_node, right = cond_expr.children[0], cond_expr.children[1], cond_expr.children[2]
                     op_text = code_bytes[op_node.start_byte:op_node.end_byte].decode()
+                    
                     if op_text in operator_map:
                         neg_cond = (
                             code_bytes[left.start_byte:left.end_byte]
@@ -970,26 +1322,75 @@ class JavaAndCPPProcessor:
                         )
                         new_condition = b"(" + neg_cond + b")"
 
-                        # Build swapped blocks
                         then_block = code_bytes[conseq_node.start_byte:conseq_node.end_byte]
-                        else_block = code_bytes[alt_block.start_byte:alt_block.end_byte]
+                        else_content = code_bytes[else_block.start_byte:else_block.end_byte]
 
-                        # Assemble new if statement
-                        new_if = (
-                            code_bytes[if_node.start_byte:cond_node.start_byte]
-                            + new_condition
-                            + code_bytes[cond_node.end_byte:conseq_node.start_byte]
-                            + else_block
-                            + b" else "
-                            + then_block
-                        )
-                        code_bytes = (
-                            code_bytes[:if_node.start_byte]
-                            + new_if
-                            + code_bytes[if_node.end_byte:]
-                        )
-                        success = True
-            except Exception:
+                        # Reconstruct the if statement
+                        # Note: We need to be careful about not duplicating 'else' keyword if it's already there
+                        # But simpler approach: verify structure is standard `if (...) { } else { }`
+                        
+                        # Safe reconstruction mapping:
+                        # PRE_COND + NEW_COND + PRE_CONSEQ + ELSE_CONTENT + PRE_ELSE + THEN_CONTENT
+                        # This assumes standard layout. safer to replace specific ranges.
+                        
+                        # Actually, typically structure: if (COND) THEN else ELSE
+                        # We want: if (!COND) ELSE else THEN
+                        
+                        # Find 'else' keyword position to anchor the swap
+                        else_keyword = None
+                        for child in if_node.children:
+                            if child.type == "else" or (child.type == "else_clause" and child.start_byte < else_block.start_byte):
+                                else_keyword = child
+                                break
+                        
+                        if else_keyword:
+                             # Construct new string
+                             # Part 1: 'if ' ... '('
+                             part1 = code_bytes[if_node.start_byte:cond_node.start_byte]
+                             # Part 2: new condition
+                             # Part 3: ')' ... '{' (before then block) - wait, cond_node includes parens usually? 
+                             # If cond_node is condition_clause, it includes parens.
+                             
+                             if cond_node.type == "condition_clause":
+                                 # replace content inside parens
+                                 part2 = new_condition # built with parens above
+                             else:
+                                 # cond_node might be just parenthesized_expression
+                                 part2 = new_condition
+
+                             # Space between cond and consq
+                             part3 = code_bytes[cond_node.end_byte:conseq_node.start_byte]
+                             
+                             # New Then Block (Old Else)
+                             part4 = else_content
+                             
+                             # Space between Then and Else keyword (rare/empty)
+                             part5 = code_bytes[conseq_node.end_byte:else_keyword.start_byte]
+                             
+                             # Else Keyword + space
+                             # If else_clause wraps, else_keyword start might strictly precede else_block start
+                             # We use else_keyword from AST
+                             part6 = code_bytes[else_keyword.start_byte:else_block.start_byte]
+                             if else_keyword.type == "else_clause":
+                                 # We need the 'else' text from within else_clause?
+                                 # Simplified: just use " else " literal if structure is messy?
+                                 # No, preserve comments/spaces if possible.
+                                 pass
+                             
+                             # New Else Block (Old Then)
+                             part7 = then_block
+                             
+                             new_if = part1 + part2 + part3 + part4 + part5 + part6 + part7
+                             
+                             code_bytes = (
+                                code_bytes[:if_node.start_byte]
+                                + new_if
+                                + code_bytes[if_node.end_byte:]
+                             )
+                             success = True
+
+            except Exception as e:
+                # print(f"DEBUG: Error in block_swap_c: {e}")
                 success = False
 
         if success:
