@@ -6,13 +6,12 @@ import random
 import re
 from multiprocessing import Pool, cpu_count
 
-import nltk
 import numpy as np
 import torch
 from tqdm import tqdm
 
 from src.data_preprocessors.transformations import (
-    NoTransformation, SemanticPreservingTransformation,
+    SemanticPreservingTransformation,
     BlockSwap, ConfusionRemover, DeadCodeInserter,
     ForWhileTransformer, OperandSwap, VarRenamer
 )
@@ -34,7 +33,7 @@ def create_transformers_from_conf_file():
         DeadCodeInserter: 1,
         ForWhileTransformer: 1,
         OperandSwap: 1,
-        VarRenamer: 1
+        VarRenamer: 0
     }
 
 # --------------------------------------------------------------------------- #

@@ -1,3 +1,13 @@
+import sys
+import os
+
+# Add project root to sys.path for direct execution
+if __name__ == "__main__" and __package__ is None:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(current_dir, "../../.."))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
 import copy
 from typing import Union, Tuple
 
@@ -51,25 +61,31 @@ class ConfusionRemover(TransformationBase):
     ) -> Tuple[str, object]:
         success = False
         transform_functions = copy.deepcopy(self.transformations)
-        while not success and len(transform_functions) > 0:
-            function = np.random.choice(transform_functions)
-            transform_functions.remove(function)
-            modified_root, modified_code, success = function(code, self)
-            if success:
+        # Try all transformations sequentially to remove all confusion types
+        np.random.shuffle(transform_functions)
+        for function in transform_functions:
+            modified_root, modified_code, succ = function(code, self)
+            if succ:
                 code = modified_code
-        root_node = self.parse_code(
-            code=code
-        )
-        return_values = self.final_processor(
-            code=code.encode(),
-            root=root_node
-        )
-        if isinstance(return_values, tuple):
-            tokens, types = return_values
-        else:
-            tokens, types = return_values, None
-        return " ".join(tokens), \
-               {
+                success = True
+        
+        # Calculate types for debug purposes (as requested)
+        # using the transformed code
+        try:
+            root_node = self.parse_code(code)
+            return_values = self.final_processor(
+                code=code.encode(),
+                root=root_node
+            )
+            if isinstance(return_values, tuple):
+                _, types = return_values
+            else:
+                types = None
+        except Exception:
+            types = []
+
+        # Return the code directly to preserve formatting
+        return code, {
                    "types": types,
                    "success": success
                }
@@ -179,13 +195,26 @@ if __name__ == '__main__':
     }
     code_directory = os.path.realpath(os.path.join(os.path.realpath(__file__), '../../../../'))
     parser_path = os.path.join(code_directory, "parser/languages.so")
-    for lang in ["c", "cpp", "java", "cs", "python", "php", "go", "ruby"]:
+    for lang in ["c", "cpp", "java"]:
+        if lang not in input_map: continue
         # lang = "php"
         lang, code = input_map[lang]
         confusion_remover = ConfusionRemover(
             parser_path, lang
         )
-        print(lang)
-        code, types = confusion_remover.transform_code(code)
-        print(types["success"])
-        print("=" * 100)
+        print(f"\n{'='*20} TESTING {lang.upper()} {'='*20}")
+        print("--- ORIGINAL ---")
+        print(code)
+        
+        try:
+            code, types = confusion_remover.transform_code(code)
+            
+            print("--- TRANSFORMED ---")
+            print(code)
+            print("-" * 50)
+            print(f"Success: {types['success']}")
+            print(f"Metadata: {types}")
+        except Exception as e:
+            print(f"ERROR: {e}")
+            import traceback
+            traceback.print_exc()

@@ -1,3 +1,13 @@
+import sys
+import os
+
+# Enable direct execution by adding project root to sys.path
+if __name__ == "__main__" and __package__ is None:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(current_dir, "../../.."))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
 import math
 import random
 import re
@@ -15,7 +25,6 @@ from src.data_preprocessors.language_processors.go_processor import GoProcessor
 from src.data_preprocessors.language_processors.ruby_processor import RubyProcessor
 from src.data_preprocessors.language_processors.utils import get_tokens
 from src.data_preprocessors.transformations import TransformationBase
-import os
 
 processor_function = {
     "java": JavaAndCPPProcessor,
@@ -55,48 +64,295 @@ class VarRenamer(TransformationBase):
         self.language = language
         self.processor = processor_function[self.language]
         self.tokenizer_function = tokenizer_function[self.language]
-        # C/CPP: function_declarator
-        # Java: class_declaration, method_declaration
-        # python: function_definition, call
-        # js: function_declaration
-        self.not_var_ptype = ["function_declarator", "class_declaration", "method_declaration", "function_definition",
-                              "function_declaration", "call", "local_function_statement"]
+        
+        # We handle exclusion logic manually in extract_targets now
+        # but keep this for reference or fallback
+        self.not_var_ptype = [] 
 
-    def extract_var_names(self, root, code_string):
-        var_names = []
+        self.BLACKLIST_NAMES = {
+            # --- Java Types & System (DO NOT RENAME) ---
+            "String", "Object", "Integer", "Boolean", "Double", "Float", "Long", "Character", "Byte", "Short", "Void", "Class",
+            "System", "Math", "Thread", "Runnable", "Exception", "Throwable", "Error", "RuntimeException",
+            "List", "Map", "Set", "ArrayList", "HashMap", "HashSet", "LinkedList", "Iterator", "Collections", "Arrays",
+            "out", "in", "err", # System.out, System.in
+            "Override", "Deprecated", "SuppressWarnings",
+            
+            # --- C/C++ Input/Output ---
+            "main", "printf", "print", "println", "System.out.println",
+            "fprintf", "sprintf", "snprintf", "wsprintf",
+            "scanf", "fscanf", "sscanf", "swscanf",
+            "gets", "fgets", "getchar", "getc",
+            "puts", "fputs", "putchar", "putc",
+            "cout", "cin", "cerr", "std::cout", "std::cin", "std::cerr",
+            
+            # --- String Manipulation (Common Sinks) ---
+            "strcpy", "strncpy", "strcat", "strncat", 
+            "memcpy", "memmove", "memset", "memcmp",
+            "strlen", "wcslen",
+            "strcmp", "strncmp", "strcasecmp",
+            "strchr", "strrchr", "strstr",
+            "strdup", "strtok",
+            
+            # --- Memory Management ---
+            "malloc", "calloc", "realloc", "free", "alloca", "new", "delete",
+            
+            # --- File Operations ---
+            "fopen", "fclose", "fread", "fwrite", "open", "read", "write", "close",
+            "fseek", "ftell", "rewind", "fflush",
+            "access", "stat", "chmod", "chown",
+            
+            # --- Process & Execution ---
+            "system", "popen", "pclose", 
+            "execl", "execlp", "execle", "execv", "execvp", "execvpe",
+            "fork", "wait", "exit", "abort",
+            "dlopen", "dlsym",
+            
+            # --- Conversions & Utilities ---
+            "atoi", "atof", "atol", "atoll", "strtol", "strtoul", "strtod",
+            "abs", "rand", "srand", "time",
+            "getenv", "putenv", "setenv", "unsetenv",
+            
+            # --- Java Common Methods ---
+            "equals", "length", "size", "toString", "hashCode", "clone",
+            "substring", "trim", "charAt", "append",
+            "parseInt", "parseFloat", "valueOf", "readLine",
+            
+            # --- Java SQL ---
+            "executeQuery", "executeUpdate", "execute", "addBatch",
+            "Connection", "Statement", "PreparedStatement", "ResultSet",
+            "prepareCall", "createStatement", "prepareStatement",
+            
+            # --- Java IO ---
+            "readObject", "writeObject", "Serializable",
+            "FileInputStream", "FileOutputStream", "ObjectInputStream", "ObjectOutputStream",
+            "File", "FileReader", "FileWriter", "BufferedReader", "PrintWriter",
+            
+            # --- Java System ---
+            "Runtime", "exec", "ProcessBuilder", "start",
+            
+            # --- Java Web ---
+            "DocumentBuilder", "DocumentBuilderFactory", "SAXParser", "SAXParserFactory",
+            "HttpServletRequest", "HttpServletResponse", "getParameter", "getAttribute",
+            "sendRedirect", "getWriter", "cookies", "getSession",
+
+            # --- Juliet Utilities ---
+            "printLine", "printIntLine", "printHexCharLine", "printLongLine", 
+            "printUnsignedLine", "printDoubleLine", "printStructLine", "printBytesLine",
+            "writeLine", "IO.writeLine", "IO.logger.log",
+            "IP_ADDRESS", "TCP_PORT",
+            
+            # --- C/C++ Windows API ---
+            "LoadLibrary", "LoadLibraryA", "LoadLibraryW", "FreeLibrary",
+            "GetProcAddress", "GetModuleHandle",
+            "sizeof", "ALLOCA",
+            
+            # --- C/C++ Network ---
+            "socket", "connect", "bind", "listen", "accept", "recv", "send",
+            "WSAStartup", "WSACleanup", "htons", "htonl", "ntohs", "ntohl",
+            "inet_addr", "inet_ntoa", "gethostbyname", "closesocket", "CLOSE_SOCKET",
+            
+            # --- C/C++ Wide Char ---
+            "wcscpy", "wcslen", "wcschr", "wcsrchr", "wcscat", "wcsncat", "wcsncpy",
+            "fgetws", "wprintf", "fwprintf", "swprintf", "vswprintf",
+            
+            # --- Java Misc ---
+            "log", "logger", "InputStreamReader", "OutputStreamWriter",
+            "ByteArrayInputStream", "ByteArrayOutputStream",
+            "Socket", "ServerSocket", "getInputStream", "getOutputStream",
+            "Cookie", "addCookie", "getCookies", "getName", "getValue", "setValue",
+            "addHeader", "setHeader", "getHeader", 
+            "URLEncoder", "URLDecoder", "encode", "decode",
+            "getDBConnection", "closeConnection",
+            "add", "put", "get", "remove", "clear", "containsKey", "containsValue",
+            "keySet", "entrySet", "iterator", "hasNext", "next",
+            "Properties", "getProperty", "setProperty", "load", "store",
+            "close", "IO", "Level", "WARNING", "IOException",
+
+            # --- C/C++ System Constants & Macros ---
+            "_WIN32", "WIN32", "_DEBUG", "NDEBUG",
+            "AF_INET", "SOCK_STREAM", "IPPROTO_TCP", "INVALID_SOCKET", "SOCKET_ERROR",
+            "NO_ERROR", "NULL", "true", "false",
+            "MAKEWORD", "HMODULE", "WSADATA", "SOCKET", "sockaddr_in", "sockaddr",
+
+            # --- C/C++ Struct Members (Common) ---
+            "sin_family", "sin_addr", "s_addr", "sin_port", "sa_family",
+            "tm_sec", "tm_min", "tm_hour", "tm_mday", "tm_mon", "tm_year", "tm_wday", "tm_yday", "tm_isdst",
+            "st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime", "st_mtime", "st_ctime",
+            "h_name", "h_aliases", "h_addrtype", "h_length", "h_addr_list", "h_addr"
+        }
+
+    def extract_targets(self, root, code_string):
+        """
+        Extract variables, functions, strings, and numbers for renaming.
+        Returns a list of tuples: (node_text, type) where type is 'VAR', 'FUNC', 'STR', 'NUM'.
+        """
+        targets = []
         queue = [root]
-
+        
         while len(queue) > 0:
             current_node = queue[0]
             queue = queue[1:]
-            if (current_node.type == "identifier" or current_node.type == "variable_name") and str(
-                    current_node.parent.type) not in self.not_var_ptype:
-                var_names.append(self.tokenizer_function(code_string, current_node)[0])
+            
+            node_type = current_node.type
+            parent_type = str(current_node.parent.type) if current_node.parent else ""
+
+            # --- 1. Identifier (VAR vs FUNC) ---
+            if node_type in ["identifier", "variable_name", "type_identifier", "field_identifier"]:
+                # Check blacklist regardless of type
+                name_tokens = self.tokenizer_function(code_string, current_node)
+                if name_tokens:
+                    name = name_tokens[0]
+                    if name not in self.BLACKLIST_NAMES:
+                        # Heuristic to distinguish FUNC vs VAR
+                        # This varies by language grammar
+                        is_func = False
+                        
+                        # Common Patterns for Function Calls/Declarations
+                        if parent_type == "method_declaration":
+                            if current_node == current_node.parent.child_by_field_name("name"):
+                                is_func = True
+                        elif parent_type in ["function_declarator", "function_definition"]:
+                             if current_node == current_node.parent.child_by_field_name("declarator") or \
+                                current_node == current_node.parent.child_by_field_name("name"):
+                                 is_func = True
+                                 
+                        elif parent_type in ["call_expression", "method_invocation", "invocation_expression"]:
+                            # In call: "foo(1)" -> foo is FUNC
+                            # In tree-sitter, the function name is usually the 'function' field or first child
+                            # Simple check: if this node is the one being called
+                             if current_node == current_node.parent.child_by_field_name("function"):
+                                 is_func = True
+                             # For Java method invocation: object.method() -> method is 'name' field
+                             if current_node == current_node.parent.child_by_field_name("name"):
+                                 is_func = True
+
+                        if is_func:
+                            targets.append((name, 'FUNC'))
+                        else:
+                            # Exclude Types/Classes from renaming if possible (or rename them as VAR/CLASS)
+                            # For simplicity, treating remaining identifiers as VAR
+                            # Exclude simple property access if needed?
+                            targets.append((name, 'VAR'))
+
+            # --- 2. String Literals (STR) ---
+            elif node_type in ["string_literal", "string"]:
+                str_content = code_string[current_node.start_byte:current_node.end_byte]
+                if len(str_content) > 3: 
+                     targets.append((str_content, 'STR'))
+
+            # --- 3. Numbers (NUM) ---
+            # Expanded list for Java/C/Python support
+            elif node_type in ["number_literal", "integer_literal", "float_literal", 
+                               "decimal_integer_literal", "hex_integer_literal", "octal_integer_literal", "binary_integer_literal",
+                               "decimal_floating_point_literal", "hex_floating_point_literal"]:
+                num_content = code_string[current_node.start_byte:current_node.end_byte]
+                # Avoid renaming simple 0, 1, -1 which are often logic flags
+                if num_content not in ["0", "1", "-1", "0.0"]:
+                    targets.append((num_content, 'NUM'))
+                    
             for child in current_node.children:
                 queue.append(child)
-        return var_names
+        return targets
 
     def var_renaming(self, code_string):
-        root = self.parse_code(code_string)
-        original_code = self.tokenizer_function(code_string, root)
-        # print(" ".join(original_code))
-        var_names = self.extract_var_names(root, code_string)
-        var_names = list(set(var_names))
-        num_to_rename = math.ceil(0.2 * len(var_names))
-        random.shuffle(var_names)
-        var_names = var_names[:num_to_rename]
-        var_map = {}
-        for idx, v in enumerate(var_names):
-            var_map[v] = f"VAR_{idx}"
-        modified_code = []
-        for t in original_code:
-            if t in var_names:
-                modified_code.append(var_map[t])
-            else:
-                modified_code.append(t)
+        # 1. Parsing & Analysis Strategy
+        # For Java, if the code snippet is just a method without a class, Tree-sitter often fails to identify 'method_declaration'.
+        # We assume if no 'class/interface/enum' keyword is found at top level, we wrap it.
+        analysis_code = code_string
+        if self.language == 'java':
+            # Simple heuristic: check if typical class decl pattern exists
+            # If not, wrap in a dummy class to help the parser identify methods correctly.
+            if not re.search(r'\b(class|interface|enum)\s+\w+', code_string):
+                analysis_code = f"public class AnalysisWrapper {{ {code_string} }}"
 
-        modified_code_string = " ".join(modified_code)
-        if modified_code != original_code:
+        analysis_root = self.parse_code(analysis_code)
+        
+        # 1. Identify targets using the potentially wrapped code
+        targets = self.extract_targets(analysis_root, analysis_code)
+        
+        # Unique identifying to generate maps
+        vars_found = list(set([t[0] for t in targets if t[1] == 'VAR']))
+        funcs_found = list(set([t[0] for t in targets if t[1] == 'FUNC']))
+        strs_found = list(set([t[0] for t in targets if t[1] == 'STR']))
+        nums_found = list(set([t[0] for t in targets if t[1] == 'NUM']))
+        
+        # Create Mappings
+        # Remove wrapper-specific artifacts if any (AnalysisWrapper might be caught as VAR/CLASS)
+        if "AnalysisWrapper" in vars_found: vars_found.remove("AnalysisWrapper")
+
+        
+        root = self.parse_code(code_string) # Re-parse original code for replacement walk
+        
+        # Create Mappings
+        replacement_map = {}
+        for i, v in enumerate(vars_found): replacement_map[v] = f"VAR_{i}"
+        for i, f in enumerate(funcs_found): replacement_map[f] = f"FUNC_{i}"
+        for i, s in enumerate(strs_found): replacement_map[s] = f"\"STR_{i}\"" # Add quotes for strings
+        for i, n in enumerate(nums_found): replacement_map[n] = f"NUM_{i}" # Numbers are raw text
+
+        if not replacement_map:
+            return root, code_string, False
+
+        # 2. Find Occurrences (Pass 2)
+        replacements = [] 
+        queue = [root]
+        
+        while len(queue) > 0:
+            current_node = queue[0]
+            queue = queue[1:]
+            
+            start = current_node.start_byte
+            end = current_node.end_byte
+            content = code_string[start:end]
+            
+            # Check if this node content is in our map and matches logical type
+            # (Simplification: just checking text content match for mapped items)
+            # We trust extract_targets logic, so if exact content match, we replace.
+            # However, we must ensure we don't replace substrings (e.g. 'var' inside 'variable')
+            # But here we are iterating NODES, so 'content' is the full token.
+            
+            # We strictly check node types again to avoid false positives 
+            # (e.g. dont replace string content inside comment node if comment node was whole)
+            # But the queue contains leaf nodes too.
+            
+            ntype = current_node.type
+            is_target_type = ntype in ["identifier", "variable_name", "type_identifier", "field_identifier", 
+                                       "string_literal", "string", 
+                                       "number_literal", "integer_literal", "float_literal",
+                                       "decimal_integer_literal", "hex_integer_literal", "octal_integer_literal", "binary_integer_literal",
+                                       "decimal_floating_point_literal", "hex_floating_point_literal"]
+            
+            if is_target_type and content in replacement_map:
+                replacements.append((start, end, replacement_map[content]))
+
+            for child in current_node.children:
+                queue.append(child)
+                
+        # 3. Apply replacements REVERSE
+        # Filter duplicates (if any parent/child overlap logic existed - unlikely with tree leaves)
+        # Sort reverse
+        replacements.sort(key=lambda x: x[0], reverse=True)
+        
+        # Deduplicate identical ranges (just in case)
+        unique_replacements = []
+        last_range = -1
+        for r in replacements:
+            if r[0] != last_range:
+                unique_replacements.append(r)
+                last_range = r[0]
+        
+        if isinstance(code_string, str):
+            code_bytes = bytearray(code_string, 'utf-8')
+        else:
+            code_bytes = bytearray(code_string)
+            
+        for start, end, new_text in unique_replacements:
+             new_text_bytes = new_text.encode('utf-8')
+             code_bytes[start:end] = new_text_bytes
+            
+        modified_code_string = code_bytes.decode('utf-8')
+        
+        if modified_code_string != code_string:
             modified_root = self.parse_code(modified_code_string)
             return modified_root, modified_code_string, True
         else:
@@ -107,128 +363,179 @@ class VarRenamer(TransformationBase):
             code: Union[str, bytes]
     ) -> Tuple[str, object]:
         root, code, success = self.var_renaming(code)
-        code = re.sub("[ \n\t]+", " ", code)
         return code, {
             "success": success
         }
 
 
 if __name__ == '__main__':
+    # Complex Java Example with Function Call differentiation
+    # Complex Java Example from CWE111_Unsafe_JNI__console_01 (bad)
     java_code = """
-    class A{
-        int foo(int n){
-            int res = 0;
-            for(int i = 0; i < n; i++) {
-                int j = 0;
-                while (j < i){
-                    res += j; 
+    public class Test {
+        public void bad() throws IOException 
+        {
+            InputStreamReader readerInputStream = null;
+            BufferedReader readerBuffered = null;
+            int intNumber = 0;
+            try
+            {
+                IO.writeLine("Enter a string: (asdf)" );
+                readerInputStream = new InputStreamReader(System.in, "UTF-8");
+                readerBuffered = new BufferedReader(readerInputStream);
+                String stringLine = readerBuffered.readLine();
+                IO.writeLine("How long was your string? (200) ");
+                intNumber = Integer.parseInt(readerBuffered.readLine());
+                IO.writeLine("Result from native method: " + test(stringLine, intNumber));  
+            }
+            catch (IOException exceptIO)
+            {
+                IO.logger.log(Level.WARNING, "Error with stream reading", exceptIO);
+                return;
+            }
+            finally 
+            {
+                try 
+                {
+                    if (readerBuffered != null) 
+                    {
+                        readerBuffered.close();
+                    }
+                }
+                catch (IOException exceptIO) 
+                {
+                    IO.logger.log(Level.WARNING, "Error closing BufferedReader", exceptIO);
+                }
+                try 
+                {
+                    if (readerInputStream != null) 
+                    {
+                        readerInputStream.close();
+                    }
+                }              
+                catch (IOException exceptIO) 
+                {
+                    IO.logger.log(Level.WARNING, "Error closing InputStreamReader", exceptIO);
                 }
             }
-            return res;
         }
     }
     """
-    python_code = """def foo(n):
-    res = 0
-    for i in range(0, 19, 2):
-        res += i
-    i = 0
-    while i in range(n):
-        res += i
-        i += 1
-    return res
-    """
+
+    # Complex C Example from CWE114_Process_Control__w32_char_connect_socket_01_bad
     c_code = """
-        int foo(int n){
-            int res = 0;
-            for(int i = 0; i < n; i++) {
-                int j = 0;
-                while (j < i){
-                    res += j; 
+    void CWE114_Process_Control__w32_char_connect_socket_01_bad()
+    {
+        char * data;
+        char dataBuffer[100] = "";
+        data = dataBuffer;
+        {
+    #ifdef _WIN32
+            WSADATA wsaData;
+            int wsaDataInit = 0;
+    #endif
+            int recvResult;
+            struct sockaddr_in service;
+            char *replace;
+            SOCKET connectSocket = INVALID_SOCKET;
+            size_t dataLen = strlen(data);
+            strlen(data);
+            strlen(data);
+            strlen(data);
+            do
+            {
+    #ifdef _WIN32
+                if (WSAStartup(MAKEWORD(2,2), &wsaData) != NO_ERROR)
+                {
+                    break;
+                }
+                wsaDataInit = 1;
+    #endif
+                 
+                connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+                if (connectSocket == INVALID_SOCKET)
+                {
+                    break;
+                }
+                memset(&service, 0, sizeof(service));
+                service.sin_family = AF_INET;
+                service.sin_addr.s_addr = inet_addr(IP_ADDRESS);
+                service.sin_port = htons(TCP_PORT);
+                if (connect(connectSocket, (struct sockaddr*)&service, sizeof(service)) == SOCKET_ERROR)
+                {
+                    break;
+                }
+                 
+                 
+                recvResult = recv(connectSocket, (char *)(data + dataLen), sizeof(char) * (100 - dataLen - 1), 0);
+                if (recvResult == SOCKET_ERROR || recvResult == 0)
+                {
+                    break;
+                }
+                 
+                data[dataLen + recvResult / sizeof(char)] = '\\0';
+                 
+                replace = strchr(data, '\\r');
+                if (replace)
+                {
+                    *replace = '\\0';
+                }
+                replace = strchr(data, '\\n');
+                if (replace)
+                {
+                    *replace = '\\0';
                 }
             }
-            return res;
-        }
-    """
-    cs_code = """
-    int foo(int n){
-            int res = 0, i = 0;
-            while(i < n) {
-                int j = 0;
-                while (j < i){
-                    res += j; 
-                }
+            while (0);
+            if (connectSocket != INVALID_SOCKET)
+            {
+                CLOSE_SOCKET(connectSocket);
             }
-            return res;
+    #ifdef _WIN32
+            if (wsaDataInit)
+            {
+                WSACleanup();
+            }
+    #endif
         }
-    """
-    js_code = """function foo(n) {
-        let res = '';
-        for(let i = 0; i < 10; i++){
-            res += i.toString();
-            res += '<br>';
-        } 
-        while ( i < 10 ; ) { 
-            res += 'bk'; 
+        {
+            HMODULE hModule;
+             
+            hModule = LoadLibraryA(data);
+            if (hModule != NULL)
+            {
+                FreeLibrary(hModule);
+                printLine("Library loaded and freed successfully");
+            }
+            else
+            {
+                printLine("Unable to load library");
+            }
         }
-        return res;
     }
     """
-    ruby_code = """
-        for i in 0..5 do
-           puts "Value of local variable is #{i}"
-           if false then
-                puts "False printed"
-                while i == 10 do
-                    print i;
-                end
-                i = u + 8
-            end
-        end
-        """
-    go_code = """
-        func main() {
-            sum := 0;
-            i := 0;
-            for ; i < 10;  {
-                sum += i;
-            }
-            i++;
-            fmt.Println(sum);
-        }
-        """
-    php_code = """
-    <?php 
-    for ($x = 0; $x <= 10; $x++) {
-        echo "The number is: $x <br>";
-    }
-    $x = 0 ; 
-    while ( $x <= 10 ) { 
-        echo "The number is:  $x  <br> "; 
-        $x++; 
-    } 
-    ?> 
-    """
+    
     input_map = {
         "java": ("java", java_code),
         "c": ("c", c_code),
-        "cpp": ("cpp", c_code),
-        "cs": ("c_sharp", cs_code),
-        "js": ("javascript", js_code),
-        "python": ("python", python_code),
-        "php": ("php", php_code),
-        "ruby": ("ruby", ruby_code),
-        "go": ("go", go_code),
     }
+    
     code_directory = os.path.realpath(os.path.join(os.path.realpath(__file__), '../../../..'))
     parser_path = os.path.join(code_directory, "parser/languages.so")
-    for lang in ["c", "cpp", "java", "python", "php", "ruby", "js", "go", "cs"]:
-        lang, code = input_map[lang]
-        var_renamer = VarRenamer(
-            parser_path, lang
-        )
-        print(lang)
-        code, meta = var_renamer.transform_code(code)
-        print(re.sub("[ \t\n]+", " ", code))
-        print(meta)
-        print("=" * 150)
+    
+    for lang_key in ["c", "java"]:
+        if lang_key not in input_map: continue
+            
+        lang, code = input_map[lang_key]
+        print(f"\\n{'='*20} TESTING {lang.upper()} {'='*20}")
+        
+        var_renamer = VarRenamer(parser_path, lang)
+        
+        print("--- ORIGINAL ---")
+        print(code)
+        
+        new_code, meta = var_renamer.transform_code(code)
+        
+        print("\\n--- TRANSFORMED (Check VAR vs FUNC vs STR vs NUM) ---")
+        print(new_code)
+        print("-" * 50)
