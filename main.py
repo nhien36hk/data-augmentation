@@ -33,6 +33,9 @@ try:
     from src.data_preprocessors.transformations.dead_code_inserter import DeadCodeInserter
     from src.data_preprocessors.transformations.for_while_transformation import ForWhileTransformer
     from src.data_preprocessors.transformations.operand_swap_transformations import OperandSwap
+    from src.data_preprocessors.transformations.simple_perturbations import (
+        CommentInserter, SpacingNormalizer, IdentifierRenamer, LineCommenter
+    )
 except ImportError as e:
     print(f"Error: Could not import transformations. Make sure you are running from the project root. Detail: {e}")
     sys.exit(1)
@@ -53,7 +56,11 @@ TRANSFORMERS: List[Type] = [
     ConfusionRemover,
     DeadCodeInserter,
     ForWhileTransformer,
-    OperandSwap
+    OperandSwap,
+    CommentInserter,
+    SpacingNormalizer,
+    IdentifierRenamer,
+    LineCommenter
 ]
 
 def get_parser_lang(mode: str, file_name: str) -> str:
@@ -142,6 +149,7 @@ def process_file(
     try:
         with open(input_file, 'r', encoding='utf-8') as f:
             data_list = json.load(f)
+            data_list = data_list[:10]
     except Exception as e:
         logger.error(f"Failed to load {input_file}: {e}")
         return
