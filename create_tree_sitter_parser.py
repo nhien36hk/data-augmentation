@@ -39,10 +39,18 @@ def compile_parser():
     })
     
     scanner_cc = os.path.join(cpp_src, "scanner.cc")
+    scanner_c = os.path.join(cpp_src, "scanner.c")
     if os.path.exists(scanner_cc):
          tasks.append({
             "src": scanner_cc,
             "compiler": "g++",
+            "flags": ["-fPIC", "-I", cpp_src, "-c"],
+            "out": os.path.join(output_dir, "cpp_scanner.o")
+        })
+    elif os.path.exists(scanner_c):
+         tasks.append({
+            "src": scanner_c,
+            "compiler": "gcc",
             "flags": ["-fPIC", "-I", cpp_src, "-c"],
             "out": os.path.join(output_dir, "cpp_scanner.o")
         })
