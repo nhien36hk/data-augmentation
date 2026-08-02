@@ -29,6 +29,7 @@ try:
     from src.data_preprocessors.transformations.dead_code_inserter import DeadCodeInserter
     from src.data_preprocessors.transformations.for_while_transformation import ForWhileTransformer
     from src.data_preprocessors.transformations.operand_swap_transformations import OperandSwap
+    from src.data_preprocessors.transformations.var_renaming_transformation import VarRenamer
 except ImportError as e:
     print(f"Error: Could not import transformations. Make sure you are running from the project root. Detail: {e}")
     sys.exit(1)
@@ -49,7 +50,8 @@ TRANSFORMERS: List[Type] = [
     ConfusionRemover,
     DeadCodeInserter,
     ForWhileTransformer,
-    OperandSwap
+    OperandSwap,
+    VarRenamer
 ]
 
 
