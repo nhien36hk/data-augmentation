@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Script to apply multiple Random Code Transformations to JSONL datasets.
-Mimics run_rename.py structure but selects 1 of 5 transformations per sample
-in a balanced random manner (try until success).
+Script to apply multiple Random Code Transformations to C/C++ datasets for CoCa paper reproduction.
+Applies transformations probabilistically (lottery with threshold p > 0.5) in a chained manner.
 
 Usage:
-    python run_augmentation.py --input_dir data/raw --output_dir data/augmented --mode c
-    python run_augmentation.py --input_dir data/raw --output_dir data/augmented --mode java
+    python run_augmentation.py --input_dir data/raw/devign_split --output_dir data/augmented/devign_split
 """
 
 import os
@@ -16,10 +14,8 @@ import logging
 import argparse
 import multiprocessing
 import random
-import traceback
 from pathlib import Path
-from typing import Dict, Any, Tuple, Optional, List, Type
-from functools import partial
+from typing import Dict, Any, Tuple, List, Type
 from tqdm import tqdm
 
 # Add project root to sys.path to import src modules
@@ -56,150 +52,112 @@ TRANSFORMERS: List[Type] = [
     OperandSwap
 ]
 
-def get_parser_lang(mode: str, file_name: str) -> str:
-    """
-    Determine the correct Tree-sitter language identifier based on mode and filename.
-    
-    Args:
-        mode: 'c' or 'java'
-        file_name: The source filename (e.g., "test.c", "main.cpp")
-        
-    Returns:
-        The language string ('c', 'cpp', 'java')
-    """
-    if mode == "java":
-        return "java"
-    
-    if mode == "c":
-        # Check extensions for C++
-        if file_name.endswith(".cpp") or file_name.endswith(".cc") or file_name.endswith(".cxx"):
-            return "cpp"
-        # Default to c for .c or others
-        return "c"
-        
-    return mode
 
-
-def process_line(args: Tuple[str, str, str]) -> Optional[str]:
-    """
-    Worker function to process a single JSON line.
-    
-    Args:
-        args: Tuple containing (json_line_string, parser_path, mode)
-        
-    Returns:
-        Processed JSON string or None if failed.
-    """
-    line, parser_path, mode = args
-    if not line.strip():
-        return None
-
-    try:
-        data: Dict[str, Any] = json.loads(line)
-    except json.JSONDecodeError:
-        return None
+def process_sample(args: Tuple[Dict[str, Any], str, float]) -> Dict[str, Any]:
+    data, parser_path, prob_threshold = args
+    if not isinstance(data, dict):
+        return data
 
     code_content = data.get("func")
     if not code_content:
-        return line # Return original if no code found
+        data["func_mutated"] = ""
+        data["transformations_used"] = []
+        data["augmented"] = False
+        return data
 
-    file_name = data.get("file", "")
-    
-    # Determine language
-    lang = get_parser_lang(mode, file_name)
+    current_code = code_content
+    transformations_used: List[str] = []
 
-    # Strategy: Balanced Random Selection
-    # 1. Shuffle the list of transformers for this random sample
-    # 2. Try each one in order until one succeeds
-    
-    transformers_shuffled = list(TRANSFORMERS)
-    random.shuffle(transformers_shuffled)
-    
-    transformation_success = False
-    
-    # Try transformations
-    for TransformerClass in transformers_shuffled:
-        try:
-            # Instantiate per line to be safe with multiprocessing and parser state
-            transformer = TransformerClass(parser_path=parser_path, language=lang)
-            
-            # transform_code returns: (new_code_string, meta_dict)
-            new_code, meta = transformer.transform_code(code_content)
-            
-            # Check success flag from metadata
-            success = meta.get("success", False)
-            
-            # Double check: sometimes success is True but code is identical (guard)
-            if success and new_code.strip() != code_content.strip():
-                data["func"] = new_code
-                data["augmented"] = True
-                data["transformation_used"] = TransformerClass.__name__
-                transformation_success = True
-                # User requirement: "chỉ cần 1 biến thể success là được"
-                break 
-                
-        except Exception:
-            # If one transformer fails (crashes), continue to the next one
+    # Roll lottery for all transformers and chain successful transformations
+    for TransformerClass in TRANSFORMERS:
+        # Lottery check: only apply transformer if random draw > prob_threshold (0.5)
+        if random.random() <= prob_threshold:
             continue
 
-    # If all failed, we still return the original data (can be filtered later if needed, 
-    # but run_rename.py returns original too). 
-    # The 'transformed_code' field will be missing if no transformation succeeded.
-    
-    return json.dumps(data)
+        try:
+            transformer = TransformerClass(parser_path=parser_path, language="cpp")
+            new_code, meta = transformer.transform_code(current_code)
+            
+            success = meta.get("success", False)
+            if success and new_code and new_code.strip() != current_code.strip():
+                current_code = new_code
+                transformations_used.append(TransformerClass.__name__)
+        except Exception:
+            # If a transformer fails on this sample, safely proceed to next
+            continue
+
+    # Update sample dictionary with original code in 'func' and augmented in 'func_mutated'
+    data["func_mutated"] = current_code
+    data["transformations_used"] = transformations_used
+    data["augmented"] = len(transformations_used) > 0
+
+    return data
 
 
 def process_file(
     input_file: Path, 
     output_file: Path, 
-    mode: str, 
-    num_workers: int
+    num_workers: int,
+    prob_threshold: float = 0.5
 ) -> None:
-    """Read input file, process lines in parallel, and write to output."""
+    """Read input JSON/JSONL file, process samples in parallel, and write to output."""
     
-    # 1. Read all lines
     logger.info(f"Reading {input_file}...")
-    with open(input_file, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
+    
+    is_jsonl = input_file.suffix.lower() == ".jsonl"
+    
+    if is_jsonl:
+        with open(input_file, 'r', encoding='utf-8') as f:
+            samples = [json.loads(line) for line in f if line.strip()]
+    else:
+        with open(input_file, 'r', encoding='utf-8') as f:
+            samples = json.load(f)
 
-    total_lines = len(lines)
+    if not isinstance(samples, list):
+        logger.error(f"Expected a list of records in {input_file}, got {type(samples)}")
+        return
+
+    total_samples = len(samples)
     parser_path_str = str(PARSER_LIB_PATH)
     
     # Pack arguments for worker
-    worker_args = [(line, parser_path_str, mode) for line in lines]
+    worker_args = [(sample, parser_path_str, prob_threshold) for sample in samples]
 
-    # 2. Process in parallel
-    logger.info(f"Processing {total_lines} samples with {num_workers} workers...")
+    # Process in parallel
+    logger.info(f"Processing {total_samples} samples with {num_workers} workers (p_threshold={prob_threshold})...")
     
-    # We use a lower chunksize for augmentation because it might be slower than renaming
     with multiprocessing.Pool(processes=num_workers) as pool:
-        results = list(tqdm(
-            pool.imap(process_line, worker_args, chunksize=50),
-            total=total_lines,
+        processed_samples = list(tqdm(
+            pool.imap(process_sample, worker_args, chunksize=50),
+            total=total_samples,
             unit="sample"
         ))
+
+    # Filter out samples where augmentation failed (augmented is False)
+    final_samples = [sample for sample in processed_samples if sample.get("augmented", False)]
+    augmented_count = len(final_samples)
+    logger.info(f"Augmentation Success Rate: {augmented_count}/{total_samples} ({augmented_count/total_samples*100:.2f}%)")
+
+    # Write Output (only augmented samples)
+    logger.info(f"Writing {augmented_count} augmented samples to {output_file}...")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
     
-    # Filter Nones
-    processed_lines = [r for r in results if r is not None]
-
-    # Calculate stats
-    augmented_count = sum(1 for line in processed_lines if '"augmented": true' in line)
-    logger.info(f"Augmentation Success Rate: {augmented_count}/{len(processed_lines)} ({augmented_count/len(processed_lines)*100:.2f}%)")
-
-    # 3. Write Output
-    logger.info(f"Writing to {output_file}...")
-    with open(output_file, 'w', encoding='utf-8') as f:
-        for line in processed_lines:
-            f.write(line + '\n')
+    if is_jsonl:
+        with open(output_file, 'w', encoding='utf-8') as f:
+            for sample in final_samples:
+                f.write(json.dumps(sample, ensure_ascii=False) + '\n')
+    else:
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(final_samples, f, indent=2, ensure_ascii=False)
             
-    logger.info(f"Done. Saved to {output_file}")
+    logger.info(f"Done. Saved {augmented_count} samples to {output_file}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Random Code Augmentation Runner (5 Types)")
-    parser.add_argument("--input_dir", type=str, required=True, help="Path to raw jsonl folder")
-    parser.add_argument("--output_dir", type=str, required=True, help="Path to save augmented jsonl")
-    parser.add_argument("--mode", type=str, choices=["c", "java"], required=True, help="Language mode: 'c' (auto-detects cpp) or 'java'")
+    parser = argparse.ArgumentParser(description="Code Augmentation Runner for CoCa Paper (Chained Transformations)")
+    parser.add_argument("--input_dir", type=str, default="data/raw/devign_split", help="Path to raw json/jsonl folder")
+    parser.add_argument("--output_dir", type=str, default="data/augmented/devign_split", help="Path to save augmented json/jsonl")
+    parser.add_argument("--prob_threshold", type=float, default=0.5, help="Lottery probability threshold (> 0.5 triggers transformation)")
     parser.add_argument("--workers", type=int, default=os.cpu_count(), help="Number of parallel workers")
     
     args = parser.parse_args()
@@ -219,31 +177,17 @@ def main():
 
     out_path.mkdir(parents=True, exist_ok=True)
 
-    # Process all jsonl files
-    jsonl_files = list(in_path.glob("*.jsonl"))
-    if not jsonl_files:
-        logger.warning(f"No .jsonl files found in {in_path}")
+    # Process all json and jsonl files in input_dir
+    data_files = sorted(list(in_path.glob("*.json")) + list(in_path.glob("*.jsonl")))
+    if not data_files:
+        logger.warning(f"No .json or .jsonl files found in {in_path}")
         return
 
-    for file_path in jsonl_files:
-        filename = file_path.name.lower()
-        
-        # Simple filename filtering based on mode (same as run_rename.py)
-        if args.mode == 'java' and 'java' not in filename:
-            logger.info(f"Skipping {file_path.name} (Not a Java dataset)")
-            continue
-            
-        if args.mode == 'c' and 'java' in filename:
-            logger.info(f"Skipping {file_path.name} (Found 'java' in name, but mode is 'c')")
-            continue
-
-        # Output filename: add _augmented suffix
-        # User requested: "lưu vào dataset đúng cái row đó nhưng thêm 1 column là transformed_code"
-        # but also implied creating a new output similar to run_rename.py logic.
-        output_file = out_path / f"{file_path.stem}_augmented{file_path.suffix}"
+    for file_path in data_files:
+        output_file = out_path / file_path.name
         
         logger.info(f"Processing {file_path.name} -> {output_file.name}")
-        process_file(file_path, output_file, args.mode, args.workers)
+        process_file(file_path, output_file, args.workers, args.prob_threshold)
 
 if __name__ == "__main__":
     main()
